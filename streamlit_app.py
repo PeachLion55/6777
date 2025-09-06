@@ -10,7 +10,7 @@ import numpy as np
 import sqlite3
 import logging
 import uuid
-import re
+import re 
 
 # =========================================================
 # PAGE CONFIGURATION & GLOBAL STYLING
@@ -160,6 +160,7 @@ def ta_update_streak():
                 st.session_state.streak = streak
         except Exception as e: logging.error(f"Failed to update streak for {username}: {str(e)}")
 
+
 # =========================================================
 # DATABASE CONNECTION (Standalone test setup)
 # =========================================================
@@ -192,6 +193,7 @@ try:
         user_data_loaded = json.loads(user_data_result[0])
         st.session_state.drawings = user_data_loaded.get("drawings", {})
         st.session_state.strategies = pd.DataFrame(user_data_loaded.get("strategies", []))
+
 except Exception as e:
     logging.error(f"Failed to initialize database: {str(e)}", exc_info=True)
     st.error(f"Database initialization failed.")
@@ -200,6 +202,7 @@ except Exception as e:
 # =========================================================
 # JOURNAL SCHEMA & ROBUST DATA MIGRATION
 # =========================================================
+
 journal_cols = [
     "Trade ID", "Date", "Entry Time", "Exit Time", "Symbol", "Trade Type", "Lots",
     "Entry Price", "Stop Loss Price", "Take Profit Price", "Final Exit Price",
@@ -220,22 +223,24 @@ journal_dtypes = {
     "Exit Screenshot": str, "Tags": str
 }
 
-# Robust initialization logic to ensure st.session_state always matches the current schema.
 if "tools_trade_journal" not in st.session_state:
     st.session_state.tools_trade_journal = pd.DataFrame(columns=journal_cols).astype(journal_dtypes, errors='ignore')
 else:
+    # Robust migration logic to prevent KeyErrors from schema changes
     current_df = st.session_state.tools_trade_journal.copy()
     migrated_df = pd.DataFrame(index=current_df.index)
+
     for col in journal_cols:
         if col in current_df.columns:
             migrated_df[col] = current_df[col]
-        else:
+        else: # Handle newly added columns with defaults
             dtype = journal_dtypes.get(col, str)
             if dtype == str: migrated_df[col] = ""
             elif 'datetime' in str(dtype): migrated_df[col] = pd.NaT
             elif dtype == float: migrated_df[col] = 0.0
             else: migrated_df[col] = None
 
+    # Final dtype enforcement
     for col, dtype in journal_dtypes.items():
         try:
             if dtype == str: migrated_df[col] = migrated_df[col].fillna('').astype(str)
@@ -243,10 +248,10 @@ else:
             elif dtype == float: migrated_df[col] = pd.to_numeric(migrated_df[col], errors='coerce').fillna(0.0).astype(float)
         except Exception as e:
              logging.error(f"Error casting column '{col}' to '{dtype}': {e}")
+    
     st.session_state.tools_trade_journal = migrated_df[journal_cols]
 
 def render_markdown_content(text_content):
-    # Wrapper div to apply consistent styling to rendered markdown notes
     return f'<div class="trade-notes-display">{text_content}</div>'
 
 
@@ -277,16 +282,15 @@ new TradingView.widget({{
 """
 st.components.v1.html(tv_html, height=670, scrolling=False)
 
-if "logged_in_user" in st.session_state:
-    st.empty() # Placeholder for future drawing buttons
 
 # =========================================================
 # TRADING JOURNAL TABS
 # =========================================================
+
 tab_entry, tab_analytics, tab_history = st.tabs(["📝 Log Trade", "📊 Analytics Dashboard", "📜 Trade Playbook"])
 
 # =========================================================
-# LOG TRADE TAB (UX-Focused Redesign)
+# LOG TRADE TAB
 # =========================================================
 with tab_entry:
     st.header("Log a New Trade")
@@ -326,22 +330,22 @@ with tab_entry:
             win_loss = st.selectbox("Outcome", options=win_loss_options, index=win_loss_options.index(initial_data.get("Win/Loss", "Win")), key="win_loss_input")
         
         st.markdown("---")
-        # --- RATIONALE & REFLECTION: The Core of the Journal ---
+        # --- RATIONALE & REFLECTION ---
         st.markdown("##### Rationale & Reflection (Use Markdown for formatting)")
         entry_rationale = st.text_area("Entry Rationale", value=initial_data.get("Entry Rationale", ""), height=120, 
-                                       help="Why did you enter this trade? What was your core thesis?", key="entry_rationale_input")
+                                       help="Why did you enter this trade?", key="entry_rationale_input")
         trade_journal_notes = st.text_area("Overall Notes & Learnings", value=initial_data.get("Trade Journal Notes", ""), height=150, 
-                                           help="How did the trade play out? What were the key takeaways, mistakes, or successes?", key="trade_journal_notes_input")
+                                           help="How did the trade play out? What were the key takeaways?", key="trade_journal_notes_input")
 
-        # --- MORE DETAILS (OPTIONAL): The Deep Dive Section ---
-        with st.expander("More Details (Optional)", expanded=False):
+        # --- MORE DETAILS (OPTIONAL) ---
+        with st.expander("More Details (Optional)"):
             cols_advanced_1, cols_advanced_2 = st.columns(2)
             with cols_advanced_1:
                 st.markdown("###### Context & Strategy")
                 user_strategies = ["(None)"] + sorted([s['Name'] for s in st.session_state.strategies.to_dict('records')])
                 default_strategy = initial_data.get("Strategy Used", "(None)")
                 default_strategy_idx = user_strategies.index(default_strategy) if default_strategy in user_strategies else 0
-                selected_strategy = st.selectbox("Strategy Used", options=user_strategies, index=default_strategy_idx, key="strategy_used_input_adv")
+                selected_strategy = st.selectbox("Strategy Used", options=user_strategies, index=default_strategy_idx, key="strategy_used_input_adv") 
                 
                 htf_context = st.text_area("Higher Timeframe Context", value=initial_data.get("HTF Context", ""), height=80, key="htf_context_input_adv")
                 
@@ -399,14 +403,12 @@ with tab_entry:
                 realized_pnl_raw = final_exit_price - entry_price if trade_type == "Long" else entry_price - final_exit_price
                 realized_r = realized_pnl_raw / risk_per_unit
 
-            # Consolidate data from both essential and optional fields
             new_trade_data = {
                 "Trade ID": trade_id, "Date": pd.to_datetime(trade_date), "Entry Time": pd.to_datetime(f"{trade_date} {st.session_state.entry_time_input}"),
                 "Exit Time": pd.to_datetime(f"{trade_date} {st.session_state.exit_time_input}"), "Symbol": symbol, "Trade Type": trade_type, "Lots": lots,
                 "Entry Price": entry_price, "Stop Loss Price": stop_loss_price, "Take Profit Price": st.session_state.take_profit_price,
                 "Final Exit Price": final_exit_price, "Win/Loss": win_loss, "PnL ($)": pnl, "Pips": pips,
-                "Initial R": initial_r, "Realized R": realized_r,
-                "Strategy Used": st.session_state.strategy_used_input_adv if st.session_state.strategy_used_input_adv != "(None)" else "",
+                "Initial R": initial_r, "Realized R": realized_r, "Strategy Used": selected_strategy if selected_strategy != "(None)" else "",
                 "HTF Context": st.session_state.htf_context_input_adv, "Market State (HTF)": st.session_state.market_state_input_adv,
                 "News Event Impact": ','.join(st.session_state.news_impact_input_adv), "Trade Setup": st.session_state.trade_setup_input_adv,
                 "Entry Rationale": entry_rationale, "Exit Rationale": exit_rationale, "Pre-Trade Mindset": st.session_state.pre_trade_mindset_input_adv,
@@ -475,4 +477,19 @@ with tab_entry:
             if progress >= 1.0: st.success("Challenge Completed!")
         with cols_gamify_2:
             st.write("**Leaderboard - Consistency**")
-            # ... Leaderboard logic from previous response ...
+            # Leaderboard logic
+            users_from_db = c.execute("SELECT username, data FROM users").fetchall()
+            leader_data = []
+            for u, d in users_from_db:
+                user_d = json.loads(d) if d else {}
+                journal_entries = user_d.get("tools_trade_journal", [])
+                if isinstance(journal_entries, list): 
+                    trade_count = sum(1 for entry in journal_entries if entry.get("Win/Loss") in ["Win", "Loss", "Breakeven"])
+                else: trade_count = 0
+                leader_data.append({"Username": u, "Trades": trade_count})
+            if leader_data:
+                leader_df = pd.DataFrame(leader_data).sort_values("Trades", ascending=False).reset_index(drop=True)
+                leader_df["Rank"] = leader_df.index + 1
+                st.dataframe(leader_df[["Rank", "Username", "Trades"]], hide_index=True)
+            else:
+                st.info("No leaderboard data yet.")
