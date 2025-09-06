@@ -454,6 +454,19 @@ def calculate_pnl_rr(symbol, direction, entry_price, stop_loss, final_exit, lots
     
     return pnl, rr
 
+# Helper function to normalize tab labels into keys for session_state.current_tab
+def normalize_tab_label_to_key(label):
+    if not isinstance(label, str):
+        return "log_new_trade" # Default key for invalid input
+    
+    clean_label = label.strip('*') # Remove leading/trailing asterisks
+    
+    # Remove known emojis and their subsequent space (if present)
+    clean_label = clean_label.replace('📝 ', '').replace('📚 ', '').replace('📊 ', '')
+    
+    # Convert to lowercase and replace spaces with underscores
+    return clean_label.lower().replace(' ', '_')
+
 
 # =========================================================
 # MOCK AUTHENTICATION & SESSION STATE SETUP
@@ -532,6 +545,8 @@ with st.sidebar:
     st.markdown("---")
     st.markdown("**Navigation**")
     # Using dummy page links, for this exercise the focus is on the tabs below
+    # Note: These buttons would typically trigger a change in `st.session_state.current_tab`
+    # and then a rerun to display the corresponding content.
     st.button("📈 Trading Chart", key="nav_chart", use_container_width=True, on_click=lambda: st.session_state.update(current_tab="trading_chart"))
     st.button("📝 Log New Trade", key="nav_log", use_container_width=True, on_click=lambda: st.session_state.update(current_tab="log_new_trade"))
     st.button("📚 Trade Playbook", key="nav_playbook", use_container_width=True, on_click=lambda: st.session_state.update(current_tab="trade_playbook"))
@@ -591,20 +606,20 @@ st.markdown("---")
 # =========================================================
 # TRADING JOURNAL TABS
 # =========================================================
-tab_entry, tab_playbook, tab_analytics = st.tabs(["**📝 Log New Trade**", "**📚 Trade Playbook**", "**📊 Analytics Dashboard**"], 
-                                                  key="main_tabs", 
-                                                  on_change=lambda: st.session_state.update(current_tab=st.session_state.main_tabs.lower().replace(' ', '_').replace('**', '')))
+tab_labels = ["**📝 Log New Trade**", "**📚 Trade Playbook**", "**📊 Analytics Dashboard**"]
+tab_entry_obj, tab_playbook_obj, tab_analytics_obj = st.tabs(tab_labels, key="main_tabs")
 
-# Set the active tab based on session state
-if 'current_tab' not in st.session_state:
+# Update st.session_state.current_tab based on the selected tab from `main_tabs` key
+if 'main_tabs' in st.session_state:
+    st.session_state.current_tab = normalize_tab_label_to_key(st.session_state.main_tabs)
+else:
+    # This ensures `current_tab` is always set, even on the very first run before a tab is explicitly clicked
     st.session_state.current_tab = "log_new_trade"
-
-# Simulate active tab display (Streamlit's native tabs handle this visually)
-# We use st.session_state.current_tab to control internal logic when needed.
 
 
 # --- TAB 1: LOG NEW TRADE ---
-with tab_entry if st.session_state.current_tab == "log_new_trade" else st.empty():
+with tab_entry_obj:
+    # Only render content if this is the active tab
     if st.session_state.current_tab == "log_new_trade":
         st.header("Log a New Trade")
         st.caption("Focus on a quick, essential entry. You can add detailed notes and screenshots later in the Playbook.")
@@ -710,7 +725,8 @@ with tab_entry if st.session_state.current_tab == "log_new_trade" else st.empty(
                 st.warning(pnl_warning)
 
 # --- TAB 2: TRADE PLAYBOOK ---
-with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.empty():
+with tab_playbook_obj:
+    # Only render content if this is the active tab
     if st.session_state.current_tab == "trade_playbook":
         st.header("Your Trade Playbook")
         st.caption("Filter, review, and refine your past trades. Edit details or add screenshots.")
@@ -834,7 +850,6 @@ with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.em
                             edit_symbol_selected = st.selectbox("Symbol", edit_symbol_options, index=initial_symbol_index, key=f"edit_symbol_select_{trade_id}")
                             edit_symbol = edit_symbol_selected
                             if edit_symbol_selected == "Other":
-                                # Corrected line:
                                 edit_custom_symbol = st.text_input("Enter Custom Symbol", value=edit_trade_data['Symbol'] if edit_trade_data['Symbol'] not in pairs_map.keys() and edit_trade_data['Symbol'] else "", key=f"edit_custom_symbol_{trade_id}").upper()
                                 edit_symbol = edit_custom_symbol if edit_custom_symbol else ""
 
@@ -853,7 +868,7 @@ with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.em
                             edit_all_strategies = sorted(list(set(st.session_state.trade_journal['Strategy'].dropna().astype(str).str.strip())))
                             
                             current_strategy_idx = 0
-                            if edit_trade_data['Strategy'] in edit_all_strategies:
+                            if edit_trade_data['Strategy'] and edit_trade_data['Strategy'] in edit_all_strategies:
                                 current_strategy_idx = edit_all_strategies.index(edit_trade_data['Strategy']) + 1 # +1 for empty option
                             
                             edit_strategy_input = st.selectbox("Strategy Used", options=[''] + edit_all_strategies + ["_Add New Strategy_"], index=current_strategy_idx, key=f"edit_strategy_select_{trade_id}")
@@ -960,7 +975,8 @@ with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.em
 
 
 # --- TAB 3: ANALYTICS DASHBOARD ---
-with tab_analytics if st.session_state.current_tab == "analytics_dashboard" else st.empty():
+with tab_analytics_obj:
+    # Only render content if this is the active tab
     if st.session_state.current_tab == "analytics_dashboard":
         st.header("Your Performance Dashboard")
         df_analytics = st.session_state.trade_journal[st.session_state.trade_journal['Outcome'].isin(['Win', 'Loss'])].copy()
@@ -1065,4 +1081,19 @@ with tab_analytics if st.session_state.current_tab == "analytics_dashboard" else
                         st.info("No R-Multiples available (e.g., no stop loss or entry/exit prices).")
 
                 chart_cols_3 = st.columns(2)
-           
+                with chart_cols_3[0]:
+                    st.markdown("##### PnL by Trade Direction")
+                    pnl_by_direction = filtered_analytics_df.groupby('Direction')['PnL'].sum().reset_index()
+                    fig_pnl_direction = px.bar(pnl_by_direction, x='Direction', y='PnL', title="", template="plotly_dark",
+                                                color='PnL', color_continuous_scale=px.colors.sequential.RdYlGn)
+                    fig_pnl_direction.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", showlegend=False)
+                    st.plotly_chart(fig_pnl_direction, use_container_width=True)
+
+                with chart_cols_3[1]:
+                    st.markdown("##### Trade Outcome Distribution")
+                    outcome_counts = filtered_analytics_df['Outcome'].value_counts().reset_index()
+                    outcome_counts.columns = ['Outcome', 'Count']
+                    fig_outcome_pie = px.pie(outcome_counts, values='Count', names='Outcome', title="", template="plotly_dark",
+                                            color_discrete_map={'Win':'#2da44e', 'Loss':'#cf222e', 'Breakeven':'#8b949e'})
+                    fig_outcome_pie.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22")
+                    st.plotly_chart(fig_outcome_pie, use_container_width=True)
