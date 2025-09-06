@@ -11,8 +11,6 @@ import hashlib
 import sqlite3
 import logging
 import uuid
-from PIL import Image
-import base64
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
@@ -186,16 +184,16 @@ if 'logged_in_user' not in st.session_state:
         conn.commit()
 
 # =========================================================
-# JOURNAL SCHEMA & ROBUST DATA MIGRATION
+# JOURNAL SCHEMA & ROBUST DATA MIGRATION (REVISED)
 # =========================================================
 journal_cols = [
-    "Trade ID", "Date", "Symbol", "Direction", "Outcome", "PnL ($)", "R:R", 
+    "Trade ID", "Date", "Symbol", "Direction", "Outcome", "PnL", "RR", 
     "Strategy", "Tags", "Entry Price", "Stop Loss", "Final Exit", "Lots",
     "Entry Rationale", "Trade Journal Notes", "Entry Screenshot", "Exit Screenshot"
 ]
 journal_dtypes = {
     "Trade ID": str, "Date": "datetime64[ns]", "Symbol": str, "Direction": str, 
-    "Outcome": str, "PnL ($)": float, "R:R": float, "Strategy": str, 
+    "Outcome": str, "PnL": float, "RR": float, "Strategy": str, 
     "Tags": str, "Entry Price": float, "Stop Loss": float, "Final Exit": float, "Lots": float,
     "Entry Rationale": str, "Trade Journal Notes": str, 
     "Entry Screenshot": str, "Exit Screenshot": str
@@ -203,12 +201,20 @@ journal_dtypes = {
 
 if 'trade_journal' not in st.session_state:
     user_data = get_user_data(st.session_state.logged_in_user)
+    # The key is 'trade_journal' now, not 'tools_trade_journal'
     journal_data = user_data.get("trade_journal", [])
     df = pd.DataFrame(journal_data)
     
     # Safely migrate data to the new schema
     for col, dtype in journal_dtypes.items():
-        if col not in df.columns:
+        # Check for legacy column names during migration
+        legacy_col_map = {"PnL": "PnL ($)", "RR": "R:R"}
+        legacy_col = legacy_col_map.get(col)
+        
+        if col not in df.columns and legacy_col and legacy_col in df.columns:
+            df.rename(columns={legacy_col: col}, inplace=True) # Rename old column
+        
+        elif col not in df.columns: # If new column doesn't exist at all
             if dtype == str: df[col] = ''
             elif 'datetime' in str(dtype): df[col] = pd.NaT
             elif dtype == float: df[col] = 0.0
@@ -289,13 +295,13 @@ with tab_entry:
             
             if risk_per_unit > 0:
                 pnl_per_unit = abs(final_exit - entry_price)
-                rr = pnl_per_unit / risk_per_unit if pnl > 0 else -(pnl_per_unit / risk_per_unit)
+                rr = (pnl_per_unit / risk_per_unit) if pnl >= 0 else -(pnl_per_unit / risk_per_unit)
 
             new_trade_data = {
                 "Trade ID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
                 "Symbol": symbol, "Direction": direction, "Outcome": outcome,
                 "Lots": lots, "Entry Price": entry_price, "Stop Loss": stop_loss, "Final Exit": final_exit,
-                "PnL ($)": pnl, "R:R": rr,
+                "PnL": pnl, "RR": rr,
                 "Tags": ','.join(tags), "Entry Rationale": entry_rationale,
                 "Strategy": '', "Trade Journal Notes": '', "Entry Screenshot": '', "Exit Screenshot": ''
             }
@@ -317,100 +323,88 @@ with tab_playbook:
     else:
         st.caption("Filter and review your past trades to refine your strategy and identify patterns.")
         
-        # --- Filtering Controls ---
         filter_cols = st.columns([1, 1, 1, 2])
-        with filter_cols[0]:
-            outcome_filter = st.multiselect("Filter by Outcome", options=df_playbook['Outcome'].unique(), default=df_playbook['Outcome'].unique())
-        with filter_cols[1]:
-            symbol_filter = st.multiselect("Filter by Symbol", options=df_playbook['Symbol'].unique(), default=df_playbook['Symbol'].unique())
-        with filter_cols[2]:
-            direction_filter = st.multiselect("Filter by Direction", options=df_playbook['Direction'].unique(), default=df_playbook['Direction'].unique())
-        with filter_cols[3]:
-             tag_options = sorted(list(set(df_playbook['Tags'].str.split(',').explode().dropna().str.strip())))
-             tag_filter = st.multiselect("Filter by Tag", options=tag_options)
+        outcome_filter = filter_cols[0].multiselect("Filter by Outcome", options=df_playbook['Outcome'].unique(), default=df_playbook['Outcome'].unique())
+        symbol_filter = filter_cols[1].multiselect("Filter by Symbol", options=df_playbook['Symbol'].unique(), default=df_playbook['Symbol'].unique())
+        direction_filter = filter_cols[2].multiselect("Filter by Direction", options=df_playbook['Direction'].unique(), default=df_playbook['Direction'].unique())
+        tag_options = sorted(list(set(df_playbook['Tags'].str.split(',').explode().dropna().str.strip())))
+        tag_filter = filter_cols[3].multiselect("Filter by Tag", options=tag_options)
         
-        # Apply filters
         filtered_df = df_playbook[
             (df_playbook['Outcome'].isin(outcome_filter)) &
             (df_playbook['Symbol'].isin(symbol_filter)) &
             (df_playbook['Direction'].isin(direction_filter))
         ]
         if tag_filter:
-            filtered_df = filtered_df[filtered_df['Tags'].apply(lambda x: any(tag in x for tag in tag_filter))]
+            filtered_df = filtered_df[filtered_df['Tags'].apply(lambda x: any(tag in str(x) for tag in tag_filter))]
 
-        # --- Display Trade Cards ---
         for index, row in filtered_df.sort_values(by="Date", ascending=False).iterrows():
             outcome_color = {"Win": "#2da44e", "Loss": "#cf222e", "Breakeven": "#8b949e"}.get(row['Outcome'], "#30363d")
-            
             with st.container():
                 st.markdown(f"""
-                <div style="border: 1px solid #30363d; border-left: 8px solid {outcome_color}; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1.5rem;">
-                    <h4>{row['Symbol']} <span style="font-weight: 500; color: {outcome_color};"> {row['Direction']} / {row['Outcome']}</span></h4>
-                    <span style="color: #8b949e;">{pd.to_datetime(row['Date']).strftime('%A, %d %B %Y')}</span>
+                <div style="border: 1px solid #30363d; border-left: 8px solid {outcome_color}; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1rem;">
+                    <h4>{row['Symbol']} <span style="font-weight: 500; color: {outcome_color};">{row['Direction']} / {row['Outcome']}</span></h4>
+                    <span style="color: #8b949e;">{row['Date'].strftime('%A, %d %B %Y')}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
-                cols = st.columns(3)
-                cols[0].metric("Net PnL", f"${row['PnL ($)]:.2f}")
-                cols[1].metric("R:R Multiple", f"{row['R:R']:.2f}R")
-                cols[2].metric("Position Size", f"{row['Lots']:.2f} lots")
+                metric_cols = st.columns(3)
+                pnl_value = row['PnL']
+                rr_value = row['RR']
+                lots_value = row['Lots']
+                
+                metric_cols[0].metric("Net PnL", f"${pnl_value:.2f}")
+                metric_cols[1].metric("R-Multiple", f"{rr_value:.2f}R")
+                metric_cols[2].metric("Position Size", f"{lots_value:.2f} lots")
                 
                 if row['Entry Rationale']:
                     st.markdown(f"**Entry Rationale:** *{row['Entry Rationale']}*")
                 if row['Tags']:
-                    st.write(f"**Tags:** `{'`, `'.join(row['Tags'].split(','))}`")
-                
-                # Full details in an expander
-                with st.expander("View Full Trade Details & Notes"):
-                     # Display formatted notes
-                    st.markdown("**Trade Journal Notes & Learnings**")
-                    if row['Trade Journal Notes']:
-                        st.markdown(f"<div class='trade-notes-display'>{row['Trade Journal Notes']}</div>", unsafe_allow_html=True)
-                    else:
-                        st.info("No detailed notes for this trade yet.")
-                     # You can add a text_area here to edit notes and a button to save
+                    tags_list = [f"`{tag.strip()}`" for tag in str(row['Tags']).split(',') if tag.strip()]
+                    st.markdown(f"**Tags:** {', '.join(tags_list)}")
                 
                 st.markdown("---")
+
 
 # --- TAB 3: ANALYTICS DASHBOARD ---
 with tab_analytics:
     st.header("Your Performance Dashboard")
-    df_analytics = st.session_state.trade_journal[st.session_state.trade_journal['Outcome'].isin(['Win', 'Loss'])]
+    df_analytics = st.session_state.trade_journal[st.session_state.trade_journal['Outcome'].isin(['Win', 'Loss'])].copy()
     
     if df_analytics.empty:
         st.info("Complete at least one winning or losing trade to view your performance analytics.")
     else:
-        # --- High-Level KPIs ---
-        total_pnl = df_analytics['PnL ($)'].sum()
+        # High-Level KPIs
+        total_pnl = df_analytics['PnL'].sum()
         total_trades = len(df_analytics)
         wins = df_analytics[df_analytics['Outcome'] == 'Win']
         losses = df_analytics[df_analytics['Outcome'] == 'Loss']
         
         win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
-        avg_win = wins['PnL ($)'].mean() if not wins.empty else 0
-        avg_loss = losses['PnL ($)'].mean() if not losses.empty else 0
-        profit_factor = wins['PnL ($)'].sum() / abs(losses['PnL ($)'].sum()) if not losses.empty and losses['PnL ($)'].sum() != 0 else float('inf')
+        avg_win = wins['PnL'].mean() if not wins.empty else 0
+        avg_loss = losses['PnL'].mean() if not losses.empty else 0
+        profit_factor = wins['PnL'].sum() / abs(losses['PnL'].sum()) if not losses.empty and losses['PnL'].sum() != 0 else 0
 
         kpi_cols = st.columns(4)
-        kpi_cols[0].metric("Net PnL ($)", f"${total_pnl:,.2f}", delta=f"{total_pnl:+,.2f}")
-        kpi_cols[1].metric("Win Rate (%)", f"{win_rate:.1f}%")
+        kpi_cols[0].metric("Net PnL ($)", f"${total_pnl:,.2f}", delta=f"{total_pnl:+.2f}")
+        kpi_cols[1].metric("Win Rate", f"{win_rate:.1f}%")
         kpi_cols[2].metric("Profit Factor", f"{profit_factor:.2f}")
-        kpi_cols[3].metric("Avg Win / Avg Loss ($)", f"${avg_win:,.2f} / ${abs(avg_loss):,.2f}")
+        kpi_cols[3].metric("Avg. Win / Loss ($)", f"${avg_win:,.2f} / ${abs(avg_loss):,.2f}")
         
         st.markdown("---")
 
-        # --- Visualizations ---
+        # Visualizations
         chart_cols = st.columns(2)
         with chart_cols[0]:
             st.subheader("Cumulative PnL")
-            df_analytics['Cumulative PnL'] = df_analytics['PnL ($)'].cumsum()
-            fig_equity = px.line(df_analytics, x=df_analytics['Date'], y='Cumulative PnL', title="Your Equity Curve", template="plotly_dark")
+            df_analytics['Cumulative PnL'] = df_analytics['PnL'].cumsum()
+            fig_equity = px.area(df_analytics, x='Date', y='Cumulative PnL', title="Your Equity Curve", template="plotly_dark")
             fig_equity.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22")
             st.plotly_chart(fig_equity, use_container_width=True)
-
+            
         with chart_cols[1]:
             st.subheader("Performance by Symbol")
-            pnl_by_symbol = df_analytics.groupby('Symbol')['PnL ($)'].sum().sort_values(ascending=False)
+            pnl_by_symbol = df_analytics.groupby('Symbol')['PnL'].sum().sort_values(ascending=False)
             fig_pnl_symbol = px.bar(pnl_by_symbol, title="Net PnL by Symbol", template="plotly_dark")
             fig_pnl_symbol.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", showlegend=False)
             st.plotly_chart(fig_pnl_symbol, use_container_width=True)
