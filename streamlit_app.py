@@ -4,8 +4,7 @@ import datetime as dt
 import os
 import json
 import hashlib
-import requests # Used for Price Alerts, but not critical for journal. Kept for completeness.
-# from streamlit_autorefresh import st_autorefresh # Not used in Backtesting page itself, remove from imports for this isolated file
+import requests 
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
@@ -14,16 +13,10 @@ import pytz
 import logging
 import math
 import uuid
-# import glob # Not explicitly used in the Backtesting page code provided, remove from imports
-# import time # Not explicitly used in the Backtesting page code provided, remove from imports
-from PIL import Image # For logo (not essential for this page but general setup)
-import io
-import base64
-# import calendar # Not explicitly used in the Backtesting page code provided, remove from imports
-
+import re # Added for robust Trade ID parsing
 
 # =========================================================
-# GLOBAL CSS & GRIDLINE SETTINGS (Copied from main app)
+# GLOBAL CSS & GRIDLINE SETTINGS
 # =========================================================
 st.markdown(
     """
@@ -45,22 +38,11 @@ st.markdown(
     /* Hide the GitHub / Share banner (bottom-right) */
     [data-testid="stDecoration"] {display: none !important;}
     
-    #/* Optional: remove extra padding/margin from main page */
-    #.css-1d391kg {padding-top: 0rem !important;}
-    #</style>
-    """,
-    unsafe_allow_html=True
-)
-
-st.markdown(
-    """
-    <style>
-    /* Remove top padding and margins for main content */
+    /* Optional: remove extra padding/margin from main page */
     .css-18e3th9, .css-1d391kg {
     padding-top: 0rem !important;
     margin-top: 0rem !important;
     }
-    /* Optional: reduce padding inside Streamlit containers */
     .block-container {
     padding-top: 0rem !important;
     }
@@ -95,328 +77,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-
-# =========================================================
-# LOGGING SETUP
-# =========================================================
-# For standalone test, logging to console might be sufficient.
-# You can uncomment to log to a file if you create a debug.log file in the same directory.
-logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-# logging.basicConfig(filename='debug.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-# =========================================================
-# TA_PRO HELPER FUNCTIONS (Essential subset)
-# =========================================================
-
-# Helper for file paths (ensures user data directories exist)
-def _ta_user_dir(user_id="guest"):
-    # Using 'user_data' for isolated test
-    root = os.path.join(os.path.dirname(__file__), "user_data") 
-    os.makedirs(root, exist_ok=True)
-    d = os.path.join(root, user_id)
-    os.makedirs(d, exist_ok=True)
-    # Ensure specific subdirectories exist for journal_images
-    os.makedirs(os.path.join(d, "journal_images"), exist_ok=True) # NEW for screenshots
-    # os.makedirs(os.path.join(d, "community_images"), exist_ok=True) # Not strictly needed for this isolated page
-    # os.makedirs(os.path.join(d, "playbooks"), exist_ok=True) # Not strictly needed for this isolated page
-    return d
-
-# Generates a short unique ID (hexadecimal)
-def _ta_hash():
-    return uuid.uuid4().hex[:12]
-
-# Custom JSON encoder for SQLite storage
-class CustomJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, (dt.datetime, dt.date)):
-            return obj.isoformat()
-        if pd.isna(obj):
-            return None
-        return super().default(obj)
-
-# Helper to save journal data to DB
-# Modified to accept conn/c directly as not using global variables anymore in isolated test.
-def _ta_save_journal(username, journal_df, conn, c):
-    try:
-        c.execute("SELECT data FROM users WHERE username = ?", (username,))
-        result = c.fetchone()
-        user_data = json.loads(result[0]) if result and result[0] else {}
-        user_data["tools_trade_journal"] = journal_df.replace({pd.NA: None, float('nan'): None}).to_dict('records')
-        c.execute("UPDATE users SET data = ? WHERE username = ?", (json.dumps(user_data, cls=CustomJSONEncoder), username))
-        conn.commit()
-        logging.info(f"Journal saved for user {username}: {len(journal_df)} trades")
-        return True
-    except Exception as e:
-        logging.error(f"Failed to save journal for {username}: {str(e)}")
-        st.error(f"Failed to save journal: {str(e)}")
-        return False
-
-# XP notification system (simplified/mocked for isolated file)
-def show_xp_notification(xp_gained):
-    st.toast(f"🎉 +{xp_gained} XP Earned!", icon="⭐")
-
-# XP update function (integrates with DB for a logged in user)
-def ta_update_xp(amount):
-    if "logged_in_user" in st.session_state:
-        username = st.session_state.logged_in_user
-        try:
-            # Need to use existing conn/c from database setup below
-            c.execute("SELECT data FROM users WHERE username = ?", (username,))
-            result = c.fetchone()
-            if result:
-                user_data = json.loads(result[0])
-                old_xp = user_data.get('xp', 0)
-                user_data['xp'] = old_xp + amount
-                level = user_data['xp'] // 100
-                if level > user_data.get('level', 0):
-                    user_data['level'] = level
-                    user_data['badges'] = user_data.get('badges', []) + [f"Level {level}"]
-                    st.balloons()
-                    st.success(f"Level up! You are now level {level}.")
-                c.execute("UPDATE users SET data = ? WHERE username = ?", (json.dumps(user_data, cls=CustomJSONEncoder), username))
-                conn.commit()
-                st.session_state.xp = user_data['xp']
-                st.session_state.level = user_data['level']
-                st.session_state.badges = user_data['badges']
-                
-                show_xp_notification(amount)
-        except Exception as e:
-            logging.error(f"Failed to update XP for {username}: {str(e)}")
-            # st.warning(f"Could not update XP: {str(e)}") # Might not show a warning in an isolated file depending on exact context
-            
-def ta_update_streak():
-    if "logged_in_user" in st.session_state:
-        username = st.session_state.logged_in_user
-        try:
-            c.execute("SELECT data FROM users WHERE username = ?", (username,))
-            result = c.fetchone()
-            if result:
-                user_data = json.loads(result[0])
-                today = dt.date.today().isoformat()
-                last_date = user_data.get('last_journal_date')
-                streak = user_data.get('streak', 0)
-                
-                if last_date:
-                    last = dt.date.fromisoformat(last_date)
-                    if last == dt.date.fromisoformat(today) - dt.timedelta(days=1):
-                        streak += 1
-                    elif last < dt.date.fromisoformat(today) - dt.timedelta(days=1):
-                        streak = 1
-                else:
-                    streak = 1
-                    
-                user_data['streak'] = streak
-                user_data['last_journal_date'] = today
-                
-                if streak % 7 == 0 and streak > 0: # Only give badge after a non-zero streak and for multiples of 7
-                    badge = "Discipline Badge"
-                    if badge not in user_data.get('badges', []):
-                        user_data['badges'] = user_data.get('badges', []) + [badge]
-                        st.balloons()
-                        st.success(f"Unlocked: {badge} for {streak} day streak!")
-                
-                c.execute("UPDATE users SET data = ? WHERE username = ?", (json.dumps(user_data, cls=CustomJSONEncoder), username))
-                conn.commit()
-                st.session_state.streak = streak
-                st.session_state.badges = user_data['badges']
-        except Exception as e:
-            logging.error(f"Failed to update streak for {username}: {str(e)}")
-            # st.warning(f"Could not update streak: {str(e)}") # Might not show a warning
-
-
-# =========================================================
-# DATABASE CONNECTION (Standalone test specific)
-# =========================================================
-DB_FILE = "test_users.db" # Using a different DB file name for testing
-
-try:
-    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, data TEXT)''')
-    # c.execute('''CREATE TABLE IF NOT EXISTS community_data (key TEXT PRIMARY KEY, data TEXT)''') # Not needed for this isolated page
-    conn.commit()
-    logging.info("SQLite database initialized successfully for isolated test.")
-    
-    # --- Simulate a logged-in user for testing ---
-    # You can comment this out to test the "not logged in" messages.
-    test_username = "test_user"
-    c.execute("SELECT username FROM users WHERE username = ?", (test_username,))
-    if c.fetchone() is None:
-        hashed_password = hashlib.sha256("test_password".encode()).hexdigest()
-        initial_data_user = json.dumps({"xp": 100, "level": 1, "badges": ["Starter"], "streak": 5, "drawings": {}, "tools_trade_journal": [], "strategies": [{"Name": "Trend Following", "Description": "Simple Trend", "Date Added": "2023-01-01"}]})
-        c.execute("INSERT INTO users (username, password, data) VALUES (?, ?, ?)", (test_username, hashed_password, initial_data_user))
-        conn.commit()
-        logging.info(f"Test user '{test_username}' created and logged in.")
-    
-    st.session_state.logged_in_user = test_username
-    # Initialize other user-specific session states if they depend on login (copied from main app's login success logic)
-    c.execute("SELECT data FROM users WHERE username = ?", (test_username,))
-    user_data = json.loads(c.fetchone()[0]) if c.fetchone() else {}
-    st.session_state.drawings = user_data.get("drawings", {})
-    st.session_state.strategies = pd.DataFrame(user_data.get("strategies", []))
-
-except Exception as e:
-    logging.error(f"Failed to initialize SQLite database for test: {str(e)}")
-    st.error(f"Test database initialization failed: {str(e)}. Please ensure you have write access or run locally.")
-
-
-# =========================================================
-# PAGE CONFIGURATION (Copied from main app)
-# =========================================================
-st.set_page_config(page_title="Forex Dashboard - Backtesting Test", layout="wide")
-
-
-# =========================================================
-# JOURNAL & DRAWING INITIALIZATION (GLOBAL SECTION - Crucial for schema)
-# =========================================================
-# Define journal columns and dtypes (UPDATED GLOBAL DEFINITIONS FOR SIMPLER UX)
-journal_cols = [
-    "Trade ID", "Date", "Entry Time", "Exit Time", "Symbol", "Trade Type", "Lots",
-    "Entry Price", "Stop Loss Price", "Take Profit Price", "Final Exit Price",
-    "Win/Loss", "PnL ($)", "Pips", "Initial R", "Realized R",
-    "Strategy Used",
-    "HTF Bias & Structure", # Consolidated: Weekly/Daily Bias + 4H/1H Structure
-    "Market State (HTF)", "News Event Impact",
-    "Setup Details", # Consolidated: Setup Name, Indicators, Entry Trigger
-    "Entry Rationale",  # Plain text/markdown
-    "Exit Rationale",   # Plain text/markdown
-    "Pre-Trade Mindset", "In-Trade Emotions", "Discipline Score 1-5",
-    "Trade Journal Notes", # General notes (reflection, analysis, adjustments combined)
-    "Entry Screenshot", "Exit Screenshot", # Local path string
-    "Tags"
-]
-
-journal_dtypes = {
-    "Trade ID": str, "Date": "datetime64[ns]", "Entry Time": "datetime64[ns]", "Exit Time": "datetime64[ns]", "Symbol": str,
-    "Trade Type": str, "Lots": float,
-    "Entry Price": float, "Stop Loss Price": float, "Take Profit Price": float, "Final Exit Price": float,
-    "Win/Loss": str, "PnL ($)": float, "Pips": float, "Initial R": float, "Realized R": float,
-    "Strategy Used": str,
-    "HTF Bias & Structure": str,
-    "Market State (HTF)": str, "News Event Impact": str,
-    "Setup Details": str,
-    "Entry Rationale": str,
-    "Exit Rationale": str,
-    "Pre-Trade Mindset": str,
-    "In-Trade Emotions": str,
-    "Discipline Score 1-5": float,
-    "Trade Journal Notes": str,
-    "Entry Screenshot": str, "Exit Screenshot": str,
-    "Tags": str
-}
-
-# This robust initialization logic is key. It ensures the session state DataFrame always matches the current schema.
-if "tools_trade_journal" not in st.session_state:
-    st.session_state.tools_trade_journal = pd.DataFrame(columns=journal_cols).astype(journal_dtypes, errors='ignore')
-    for col, dtype in journal_dtypes.items():
-        if dtype == str:
-            st.session_state.tools_trade_journal[col] = ''
-        elif 'datetime' in str(dtype):
-            st.session_state.tools_trade_journal[col] = pd.NaT
-        elif dtype == float:
-            st.session_state.tools_trade_journal[col] = 0.0
-        elif dtype == bool:
-            st.session_state.tools_trade_journal[col] = False
-else:
-    # Migrate existing journal data to new schema on app load if needed.
-    current_journal_df = st.session_state.tools_trade_journal.copy()
-    reindexed_journal = pd.DataFrame(index=current_journal_df.index, columns=journal_cols)
-
-    for col in journal_cols:
-        if col in current_journal_df.columns:
-            reindexed_journal[col] = current_journal_df[col]
-        # Handle migration for consolidated columns. This is a heuristic.
-        elif col == "HTF Bias & Structure":
-            weekly_bias = current_journal_df.get("Weekly Bias", "").astype(str).replace("None","")
-            daily_bias = current_journal_df.get("Daily Bias", "").astype(str).replace("None","")
-            h4_struct = current_journal_df.get("4H Structure", "").astype(str).replace("None","")
-            h1_struct = current_journal_df.get("1H Structure", "").astype(str).replace("None","")
-            
-            parts = []
-            if weekly_bias: parts.append(f"W:{weekly_bias}")
-            if daily_bias: parts.append(f"D:{daily_bias}")
-            if h4_struct: parts.append(f"4H:{h4_struct}")
-            if h1_struct: parts.append(f"1H:{h1_struct}")
-            reindexed_journal[col] = ", ".join(parts) if parts else ""
-        elif col == "Setup Details":
-            setup_name = current_journal_df.get("Setup Name", "").astype(str).replace("None","")
-            indicators = current_journal_df.get("Indicators Used", "").astype(str).replace("None","")
-            trigger = current_journal_df.get("Entry Trigger", "").astype(str).replace("None","")
-            
-            parts = []
-            if setup_name: parts.append(f"Setup: {setup_name}")
-            if indicators: parts.append(f"Indicators: {indicators}")
-            if trigger: parts.append(f"Trigger: {trigger}")
-            reindexed_journal[col] = ", ".join(parts) if parts else ""
-
-        elif col == "Entry Rationale":
-            val = current_journal_df.get("Reasons for Entry", current_journal_df.get("Entry Conditions", pd.Series('')))
-            reindexed_journal[col] = val.apply(lambda x: json.loads(x).get('text', '') if isinstance(x, str) and x.strip().startswith('{') else x)
-        elif col == "Exit Rationale":
-            val = current_journal_df.get("Reasons for Exit", pd.Series(''))
-            reindexed_journal[col] = val.apply(lambda x: json.loads(x).get('text', '') if isinstance(x, str) and x.strip().startswith('{') else x)
-        elif col == "Trade Journal Notes":
-            # Combine old "Notes/Journal", "Post-Trade Analysis", "Lessons Learned" etc.
-            notes_old = current_journal_df.get("Notes/Journal", pd.Series(''))
-            pta_old = current_journal_df.get("Post-Trade Analysis", pd.Series(''))
-            ll_old = current_journal_df.get("Lessons Learned", pd.Series(''))
-            
-            # Helper to extract text from old JSON-formatted fields, if present
-            def extract_text_from_old_json(cell_value):
-                try:
-                    if isinstance(cell_value, str) and cell_value.strip().startswith('{'):
-                        return json.loads(cell_value).get('text', '').strip()
-                    return cell_value.strip() if isinstance(cell_value, str) else ""
-                except json.JSONDecodeError:
-                    return cell_value.strip() if isinstance(cell_value, str) else ""
-
-            combined_notes_series = []
-            # Ensure proper iteration that matches length
-            for i in current_journal_df.index:
-                n_val = extract_text_from_old_json(notes_old.loc[i])
-                p_val = extract_text_from_old_json(pta_old.loc[i])
-                l_val = extract_text_from_old_json(ll_old.loc[i])
-
-                parts = []
-                if n_val: parts.append(f"**General Notes:**\n{n_val}")
-                if p_val: parts.append(f"**Post-Trade Analysis:**\n{p_val}")
-                if l_val: parts.append(f"**Lessons Learned:**\n{l_val}")
-                combined_notes_series.append("\n\n---\n\n".join(parts))
-            reindexed_journal[col] = combined_notes_series
-
-        elif col == "Entry Screenshot":
-            old_ss_link = current_journal_df.get("Entry Screenshot Link/Hash", "").astype(str).str.split(',', expand=True)
-            reindexed_journal[col] = old_ss_link[0].fillna("") if 0 in old_ss_link.columns else ""
-        elif col == "Exit Screenshot":
-            old_ss_link = current_journal_df.get("Entry Screenshot Link/Hash", "").astype(str).str.split(',', expand=True)
-            reindexed_journal[col] = old_ss_link[1].fillna("") if 1 in old_ss_link.columns else ""
-        
-        else: # For other cols not explicitly handled or old deprecated ones, initialize with default
-            if journal_dtypes[col] == str: reindexed_journal[col] = ""
-            elif 'datetime' in str(journal_dtypes[col]): reindexed_journal[col] = pd.NaT
-            elif journal_dtypes[col] == float: reindexed_journal[col] = 0.0
-            elif journal_dtypes[col] == bool: reindexed_journal[col] = False
-            else: reindexed_journal[col] = np.nan
-
-    for col, dtype in journal_dtypes.items():
-        if dtype == str:
-            reindexed_journal[col] = reindexed_journal[col].fillna('').astype(str)
-        elif 'datetime' in str(dtype):
-            reindexed_journal[col] = pd.to_datetime(reindexed_journal[col], errors='coerce')
-        elif dtype == float:
-            reindexed_journal[col] = pd.to_numeric(reindexed_journal[col], errors='coerce').fillna(0.0).astype(float)
-        elif dtype == bool:
-            reindexed_journal[col] = reindexed_journal[col].fillna(False).astype(bool)
-        else:
-            reindexed_journal[col] = reindexed_journal[col].astype(dtype, errors='ignore')
-
-    st.session_state.tools_trade_journal = reindexed_journal[journal_cols] # Ensure column order
-    
-# Initialize temporary journal for form (remains the same)
-if "temp_journal" not in st.session_state:
-    st.session_state.temp_journal = None
-
 # Custom CSS for rendering Markdown in text areas with Streamlit defaults.
 st.markdown("""
     <style>
@@ -444,20 +104,387 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
+
+# =========================================================
+# LOGGING SETUP
+# =========================================================
+logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+
+
+# =========================================================
+# TA_PRO HELPER FUNCTIONS (Essential subset for standalone page)
+# =========================================================
+
+# Helper for file paths (ensures user data directories exist)
+def _ta_user_dir(user_id="guest"):
+    script_dir = os.path.dirname(__file__)
+    root = os.path.join(script_dir, "user_data") 
+    os.makedirs(root, exist_ok=True)
+    d = os.path.join(root, user_id)
+    os.makedirs(d, exist_ok=True)
+    os.makedirs(os.path.join(d, "journal_images"), exist_ok=True) 
+    return d
+
+# Generates a short unique ID (hexadecimal)
+def _ta_hash():
+    return uuid.uuid4().hex[:12]
+
+# Custom JSON encoder for SQLite storage (handles datetime/pandas.NaT correctly)
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, dt.datetime):
+            return obj.isoformat()
+        if isinstance(obj, dt.date): # dt.date for date_input output
+            return obj.isoformat()
+        if pd.isna(obj): # Handle pandas Not a Number / Not a Time
+            return None
+        return super().default(obj)
+
+# Helper to save journal data to DB (requires conn and c arguments in standalone)
+def _ta_save_journal(username, journal_df, conn, c):
+    try:
+        c.execute("SELECT data FROM users WHERE username = ?", (username,))
+        result = c.fetchone()
+        user_data = json.loads(result[0]) if result and result[0] else {}
+        # Ensure datetimes are serialized properly using the custom encoder
+        user_data["tools_trade_journal"] = journal_df.replace({pd.NA: None, np.nan: None}).to_dict('records') # replace nan values for json dump compatibility
+        c.execute("UPDATE users SET data = ? WHERE username = ?", (json.dumps(user_data, cls=CustomJSONEncoder), username))
+        conn.commit()
+        logging.info(f"Journal saved for user {username}: {len(journal_df)} trades")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to save journal for {username}: {str(e)}", exc_info=True)
+        st.error(f"Failed to save journal: {str(e)}")
+        return False
+
+# XP notification system (for UI feedback)
+def show_xp_notification(xp_gained):
+    st.toast(f"🎉 +{xp_gained} XP Earned!", icon="⭐")
+
+# XP update function (integrates with DB, requires global conn/c for this standalone)
+def ta_update_xp(amount):
+    if "logged_in_user" in st.session_state and 'conn' in globals() and 'c' in globals():
+        username = st.session_state.logged_in_user
+        try:
+            c.execute("SELECT data FROM users WHERE username = ?", (username,))
+            result = c.fetchone()
+            if result:
+                user_data = json.loads(result[0])
+                old_xp = user_data.get('xp', 0)
+                user_data['xp'] = old_xp + amount
+                level = user_data['xp'] // 100
+                if level > user_data.get('level', 0):
+                    user_data['level'] = level
+                    user_data['badges'] = user_data.get('badges', []) + [f"Level {level}"]
+                    st.balloons()
+                    st.success(f"Level up! You are now level {level}.")
+                c.execute("UPDATE users SET data = ? WHERE username = ?", (json.dumps(user_data, cls=CustomJSONEncoder), username))
+                conn.commit()
+                st.session_state.xp = user_data['xp']
+                st.session_state.level = user_data['level']
+                st.session_state.badges = user_data['badges']
+                
+                show_xp_notification(amount)
+        except Exception as e:
+            logging.error(f"Failed to update XP for {username}: {str(e)}")
+            
+# Streak update function (integrates with DB, requires global conn/c for this standalone)
+def ta_update_streak():
+    if "logged_in_user" in st.session_state and 'conn' in globals() and 'c' in globals():
+        username = st.session_state.logged_in_user
+        try:
+            c.execute("SELECT data FROM users WHERE username = ?", (username,))
+            result = c.fetchone()
+            if result:
+                user_data = json.loads(result[0])
+                today = dt.date.today().isoformat()
+                last_date = user_data.get('last_journal_date')
+                streak = user_data.get('streak', 0)
+                
+                if last_date:
+                    last = dt.date.fromisoformat(last_date)
+                    if last == dt.date.fromisoformat(today) - dt.timedelta(days=1):
+                        streak += 1
+                    elif last < dt.date.fromisoformat(today) - dt.timedelta(days=1):
+                        streak = 1
+                else:
+                    streak = 1
+                    
+                user_data['streak'] = streak
+                user_data['last_journal_date'] = today
+                
+                if streak % 7 == 0 and streak > 0:
+                    badge = "Discipline Badge"
+                    if badge not in user_data.get('badges', []):
+                        user_data['badges'] = user_data.get('badges', []) + [badge]
+                        st.balloons()
+                        st.success(f"Unlocked: {badge} for {streak} day streak!")
+                
+                c.execute("UPDATE users SET data = ? WHERE username = ?", (json.dumps(user_data, cls=CustomJSONEncoder), username))
+                conn.commit()
+                st.session_state.streak = streak
+                st.session_state.badges = user_data['badges']
+        except Exception as e:
+            logging.error(f"Failed to update streak for {username}: {str(e)}")
+
+# =========================================================
+# DATABASE CONNECTION (Standalone test specific setup)
+# =========================================================
+# Using a separate DB file name for testing this page in isolation
+DB_FILE = "test_users.db" 
+
+# Global variables for DB connection. Initialized here to be accessible by helpers.
+conn = None
+c = None
+
+try:
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users (username TEXT PRIMARY KEY, password TEXT, data TEXT)''')
+    conn.commit()
+    logging.info("SQLite database initialized successfully for isolated test.")
+    
+    # --- Simulate a logged-in user for testing ---
+    # Comment these lines out if you want to test the 'not logged in' path
+    test_username = "test_user_journal"
+    st.session_state.logged_in_user = test_username 
+
+    # If test user doesn't exist, create them
+    c.execute("SELECT username FROM users WHERE username = ?", (test_username,))
+    if c.fetchone() is None:
+        hashed_password = hashlib.sha256("test_password".encode()).hexdigest()
+        # Initialize test user data, including a sample strategy
+        initial_user_data = {
+            "xp": 100, 
+            "level": 1, 
+            "badges": ["Starter"], 
+            "streak": 5, 
+            "last_journal_date": (dt.date.today() - dt.timedelta(days=1)).isoformat(), # Mock a streak for badge testing
+            "drawings": {}, 
+            "tools_trade_journal": [], 
+            "strategies": [{"Name": "Trend Following", "Description": "Simple Trend following strategy", "Date Added": "2023-01-01"}]
+        }
+        c.execute("INSERT INTO users (username, password, data) VALUES (?, ?, ?)", (test_username, hashed_password, json.dumps(initial_user_data)))
+        conn.commit()
+        logging.info(f"Test user '{test_username}' created and (mock) logged in.")
+    
+    # Load test user's data into session state
+    c.execute("SELECT data FROM users WHERE username = ?", (test_username,))
+    user_data_result = c.fetchone()
+    if user_data_result:
+        user_data_loaded = json.loads(user_data_result[0])
+        st.session_state.drawings = user_data_loaded.get("drawings", {})
+        # Ensure strategies are loaded for the dropdown in Log Trade
+        st.session_state.strategies = pd.DataFrame(user_data_loaded.get("strategies", []))
+        st.session_state.xp = user_data_loaded.get('xp', 0)
+        st.session_state.level = user_data_loaded.get('level', 0)
+        st.session_state.badges = user_data_loaded.get('badges', [])
+        st.session_state.streak = user_data_loaded.get('streak', 0)
+        st.session_state.last_journal_date = user_data_loaded.get('last_journal_date', None)
+
+except Exception as e:
+    logging.error(f"Failed to initialize SQLite database for test: {str(e)}", exc_info=True)
+    st.error(f"Test database initialization failed: {str(e)}. Please ensure you have write access to the directory where this script is located or run locally.")
+
+
+# =========================================================
+# PAGE CONFIGURATION (Ensures wide layout and appropriate title for test)
+# =========================================================
+st.set_page_config(page_title="Forex Dashboard - Backtesting Test", layout="wide")
+
+
+# =========================================================
+# JOURNAL & DRAWING INITIALIZATION (GLOBAL SECTION - Crucial for schema consistency)
+# =========================================================
+
+# Define journal columns and dtypes (SIMPLIFIED GLOBAL DEFINITIONS)
+journal_cols = [
+    "Trade ID", "Date", "Entry Time", "Exit Time", "Symbol", "Trade Type", "Lots",
+    "Entry Price", "Stop Loss Price", "Take Profit Price", "Final Exit Price",
+    "Win/Loss", "PnL ($)", "Pips", "Initial R", "Realized R",
+    "Strategy Used",
+    "HTF Context", # Consolidated for simpler input
+    "Market State (HTF)", 
+    "News Event Impact",
+    "Trade Setup", # Consolidated for simpler input (name, indicators, trigger)
+    "Entry Rationale",  # Plain text/markdown
+    "Exit Rationale",   # Plain text/markdown
+    "Pre-Trade Mindset", "In-Trade Emotions", "Discipline Score 1-5",
+    "Trade Journal Notes", # General notes (reflection, analysis, adjustments combined)
+    "Entry Screenshot", "Exit Screenshot", # Local path string
+    "Tags"
+]
+
+journal_dtypes = {
+    "Trade ID": str, "Date": "datetime64[ns]", "Entry Time": "datetime64[ns]", "Exit Time": "datetime64[ns]", "Symbol": str,
+    "Trade Type": str, "Lots": float,
+    "Entry Price": float, "Stop Loss Price": float, "Take Profit Price": float, "Final Exit Price": float,
+    "Win/Loss": str, "PnL ($)": float, "Pips": float, "Initial R": float, "Realized R": float,
+    "Strategy Used": str,
+    "HTF Context": str,
+    "Market State (HTF)": str, "News Event Impact": str,
+    "Trade Setup": str,
+    "Entry Rationale": str,
+    "Exit Rationale": str,
+    "Pre-Trade Mindset": str,
+    "In-Trade Emotions": str,
+    "Discipline Score 1-5": float,
+    "Trade Journal Notes": str,
+    "Entry Screenshot": str, "Exit Screenshot": str,
+    "Tags": str
+}
+
+# Robust initialization/migration logic to ensure st.session_state.tools_trade_journal
+# always matches the current schema, even with old/missing data.
+if "tools_trade_journal" not in st.session_state:
+    st.session_state.tools_trade_journal = pd.DataFrame(columns=journal_cols).astype(journal_dtypes, errors='ignore')
+    for col, dtype in journal_dtypes.items():
+        if dtype == str:
+            st.session_state.tools_trade_journal[col] = ''
+        elif 'datetime' in str(dtype):
+            st.session_state.tools_trade_journal[col] = pd.NaT
+        elif dtype == float:
+            st.session_state.tools_trade_journal[col] = 0.0
+        elif dtype == bool:
+            st.session_state.tools_trade_journal[col] = False
+else:
+    # Migrate existing journal data to new schema on app load if needed.
+    current_journal_df = st.session_state.tools_trade_journal.copy()
+    reindexed_journal = pd.DataFrame(index=current_journal_df.index, columns=journal_cols)
+
+    for col in journal_cols:
+        if col in current_journal_df.columns:
+            reindexed_journal[col] = current_journal_df[col]
+        # Handle migration for consolidated columns or new columns
+        elif col == "HTF Context":
+            # Attempt to combine old bias/structure fields
+            weekly_bias = current_journal_df.get("Weekly Bias", pd.Series("")).astype(str)
+            daily_bias = current_journal_df.get("Daily Bias", pd.Series("")).astype(str)
+            h4_structure = current_journal_df.get("4H Structure", pd.Series("")).astype(str)
+            h1_structure = current_journal_df.get("1H Structure", pd.Series("")).astype(str)
+
+            reindexed_journal[col] = [
+                ", ".join(filter(None, [ # filter(None, list) removes empty strings
+                    f"W:{wb}" if wb and wb != 'None' else '',
+                    f"D:{db}" if db and db != 'None' else '',
+                    f"4H:{h4}" if h4 and h4 != 'None' else '',
+                    f"1H:{h1}" if h1 and h1 != 'None' else ''
+                ]))
+                for wb, db, h4, h1 in zip(weekly_bias, daily_bias, h4_structure, h1_structure)
+            ]
+        elif col == "Trade Setup":
+            # Attempt to combine old setup name, indicators, entry trigger fields
+            setup_name = current_journal_df.get("Setup Name", pd.Series("")).astype(str)
+            indicators_used = current_journal_df.get("Indicators Used", pd.Series("")).astype(str)
+            entry_trigger = current_journal_df.get("Entry Trigger", pd.Series("")).astype(str)
+
+            reindexed_journal[col] = [
+                "; ".join(filter(None, [
+                    f"Setup: {sn}" if sn and sn != 'None' else '',
+                    f"Indicators: {iu}" if iu and iu != 'None' else '',
+                    f"Trigger: {et}" if et and et != 'None' else ''
+                ]))
+                for sn, iu, et in zip(setup_name, indicators_used, entry_trigger)
+            ]
+
+        elif col == "Entry Rationale":
+            # Migrate old 'Reasons for Entry' or 'Entry Conditions'
+            val = current_journal_df.get("Reasons for Entry", current_journal_df.get("Entry Conditions", pd.Series('')))
+            # If old data stored as JSON with style, extract text content. Otherwise, use value directly.
+            reindexed_journal[col] = val.apply(lambda x: json.loads(x).get('text', x) if isinstance(x, str) and x.strip().startswith('{') else x)
+            reindexed_journal[col] = reindexed_journal[col].fillna('')
+
+        elif col == "Exit Rationale":
+            # Migrate old 'Reasons for Exit'
+            val = current_journal_df.get("Reasons for Exit", pd.Series(''))
+            reindexed_journal[col] = val.apply(lambda x: json.loads(x).get('text', x) if isinstance(x, str) and x.strip().startswith('{') else x)
+            reindexed_journal[col] = reindexed_journal[col].fillna('')
+
+        elif col == "Trade Journal Notes":
+            # Combine 'Notes/Journal', 'Post-Trade Analysis', 'Lessons Learned', 'Adjustments' from older schemas
+            notes_old = current_journal_df.get("Notes/Journal", pd.Series(''))
+            pta_old = current_journal_df.get("Post-Trade Analysis", pd.Series(''))
+            ll_old = current_journal_df.get("Lessons Learned", pd.Series(''))
+            adjustments_old = current_journal_df.get("Adjustments", pd.Series('')) # Added for old 'Adjustments'
+
+            # Helper to extract text from old JSON-formatted fields, if present
+            def extract_clean_text(cell_value):
+                try:
+                    if isinstance(cell_value, str) and cell_value.strip().startswith('{'):
+                        return json.loads(cell_value).get('text', '').strip()
+                    return cell_value.strip() if isinstance(cell_value, str) else ""
+                except json.JSONDecodeError:
+                    return cell_value.strip() if isinstance(cell_value, str) else ""
+
+            combined_notes_series = []
+            for i in current_journal_df.index:
+                parts = []
+                n_val = extract_clean_text(notes_old.loc[i])
+                p_val = extract_clean_text(pta_old.loc[i])
+                l_val = extract_clean_text(ll_old.loc[i])
+                a_val = extract_clean_text(adjustments_old.loc[i])
+                
+                if n_val: parts.append(f"**General Notes:**\n{n_val}")
+                if p_val: parts.append(f"**Post-Trade Analysis:**\n{p_val}")
+                if l_val: parts.append(f"**Lessons Learned:**\n{l_val}")
+                if a_val: parts.append(f"**Adjustments:**\n{a_val}")
+                
+                combined_notes_series.append("\n\n---\n\n".join(filter(None, parts)))
+            reindexed_journal[col] = combined_notes_series
+
+        elif col == "Entry Screenshot":
+            old_ss = current_journal_df.get("Entry Screenshot Link/Hash", pd.Series("")).astype(str).str.split(',', expand=True)
+            reindexed_journal[col] = old_ss[0].fillna("") if not old_ss.empty and 0 in old_ss.columns else ""
+        elif col == "Exit Screenshot":
+            old_ss = current_journal_df.get("Entry Screenshot Link/Hash", pd.Series("")).astype(str).str.split(',', expand=True)
+            reindexed_journal[col] = old_ss[1].fillna("") if not old_ss.empty and 1 in old_ss.columns else ""
+        
+        elif col == "In-Trade Emotions" or col == "Discipline Score 1-5" or col == "Pre-Trade Mindset" or col == "Strategy Used" or col == "Market State (HTF)" or col == "News Event Impact":
+             # For direct mappings of fields that kept their names (or were consolidated elsewhere)
+             reindexed_journal[col] = current_journal_df.get(col, reindexed_journal[col].copy()) 
+        
+        # Default for any truly new or un-migrated old columns
+        else:
+            if journal_dtypes[col] == str: reindexed_journal[col] = ""
+            elif 'datetime' in str(journal_dtypes[col]): reindexed_journal[col] = pd.NaT
+            elif journal_dtypes[col] == float: reindexed_journal[col] = 0.0
+            elif journal_dtypes[col] == bool: reindexed_journal[col] = False
+            else: reindexed_journal[col] = np.nan
+
+    # Final dtype enforcement after all migration and filling
+    for col, dtype in journal_dtypes.items():
+        if col in reindexed_journal.columns: # Only try to set dtype if the column exists after migration
+            if dtype == str:
+                reindexed_journal[col] = reindexed_journal[col].fillna('').astype(str)
+            elif 'datetime' in str(dtype):
+                reindexed_journal[col] = pd.to_datetime(reindexed_journal[col], errors='coerce')
+            elif dtype == float:
+                reindexed_journal[col] = pd.to_numeric(reindexed_journal[col], errors='coerce').fillna(0.0).astype(float)
+            elif dtype == bool:
+                reindexed_journal[col] = reindexed_journal[col].fillna(False).astype(bool)
+            else:
+                reindexed_journal[col] = reindexed_journal[col].astype(dtype, errors='ignore')
+        # else: the column was meant to be added and already has its default.
+
+    st.session_state.tools_trade_journal = reindexed_journal[journal_cols] # Ensure final DataFrame has correct column order
+    
+# Initialize temporary journal for form (remains the same)
+if "temp_journal" not in st.session_state:
+    st.session_state.temp_journal = None
+
 # Simplified function to apply styling - now it just ensures rendering of plain Markdown.
 def render_markdown_content(text_content):
-    # We now rely on Streamlit's native Markdown rendering within a div for basic styling control
     return text_content # Directly pass the markdown content. Streamlit handles rendering
 
 
 # =========================================================
 # BACKTESTING PAGE CONTENT
 # =========================================================
-st.title("📈 Backtesting (Standalone Test)") # Title updated for clarity
+st.title("📈 Backtesting (Standalone Test)") 
 st.caption("Live TradingView chart for backtesting and a simplified, user-friendly trading journal for tracking and analyzing trades.")
 st.markdown('---')
 
-# Pair selector & symbol map (remains unchanged)
+# Pair selector & symbol map
 pairs_map = {
     "EUR/USD": "FX:EURUSD", "USD/JPY": "FX:USDJPY", "GBP/USD": "FX:GBPUSD",
     "USD/CHF": "OANDA:USDCHF", "AUD/USD": "FX:AUDUSD", "NZD/USD": "OANDA:NZDUSD",
@@ -481,7 +508,7 @@ if "logged_in_user" in st.session_state and pair not in st.session_state.drawing
     username = st.session_state.logged_in_user
     logging.info(f"Loading drawings for user {username}, pair {pair}")
     try:
-        # Use local 'c' for this standalone file
+        # Use local 'c' from global scope
         c.execute("SELECT data FROM users WHERE username = ?", (username,))
         result = c.fetchone()
         if result:
@@ -494,7 +521,7 @@ if "logged_in_user" in st.session_state and pair not in st.session_state.drawing
         logging.error(f"Error loading drawings for {username}: {str(e)}")
         st.error(f"Failed to load drawings: {str(e)}")
 
-# TradingView widget (remains unchanged)
+# TradingView widget 
 tv_html = f"""
 <div id="tradingview_widget"></div>
 <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
@@ -521,7 +548,7 @@ new TradingView.widget({{
 """
 st.components.v1.html(tv_html, height=820, scrolling=False)
 
-# Save, Load, and Refresh buttons for drawings (minor update for journal sync)
+# Save, Load, and Refresh buttons for drawings
 if "logged_in_user" in st.session_state:
     col1_draw, col2_draw, col3_draw = st.columns([1, 1, 1])
     with col1_draw:
@@ -540,13 +567,14 @@ if "logged_in_user" in st.session_state:
             username = st.session_state.logged_in_user
             logging.info(f"Load Drawings button clicked for user {username}, pair {pair}")
             try:
-                # Use local 'c' for this standalone file
+                # Use local 'c' from global scope
                 c.execute("SELECT data FROM users WHERE username = ?", (username,))
                 result = c.fetchone()
                 if result:
                     user_data = json.loads(result[0])
                     st.session_state.drawings[pair] = user_data.get("drawings", {}).get(pair, {})
-                    logging.info(f"Loaded drawings for {pair}: {st.session_state.drawings[pair]}")
+                    st.success("Drawings loaded successfully!")
+                    logging.info(f"Successfully loaded drawings for {pair}")
                 else:
                     st.info("No saved drawings for this pair.")
                     logging.info(f"No saved drawings found for {pair}")
@@ -558,60 +586,109 @@ if "logged_in_user" in st.session_state:
             username = st.session_state.logged_in_user
             logging.info(f"Refresh Account button clicked for user {username}")
             try:
-                # Use local 'c' for this standalone file
+                # Use local 'c' from global scope
                 c.execute("SELECT data FROM users WHERE username = ?", (username,))
                 result = c.fetchone()
                 if result:
                     user_data = json.loads(result[0])
                     st.session_state.drawings = user_data.get("drawings", {})
                     
-                    # Robust re-processing of journal data for new schema.
+                    # Manual call to data migration logic to re-hydrate session_state journal from DB
+                    # (This logic is robust and ensures all columns exist after loading from DB)
                     loaded_journal_raw = user_data.get("tools_trade_journal", [])
                     loaded_journal_df = pd.DataFrame(loaded_journal_raw)
 
-                    # Create an empty, fully-structured DataFrame with all current journal_cols
-                    master_journal_df = pd.DataFrame(columns=journal_cols)
-
-                    # Copy existing data, fill missing with defaults based on dtype
+                    reindexed_journal = pd.DataFrame(index=loaded_journal_df.index, columns=journal_cols)
                     for col in journal_cols:
                         if col in loaded_journal_df.columns:
-                            master_journal_df[col] = loaded_journal_df[col]
-                        else:
-                            if journal_dtypes[col] == str:
-                                master_journal_df[col] = ""
-                            elif 'datetime' in str(journal_dtypes[col]):
-                                master_journal_df[col] = pd.NaT # pandas Not-a-Time for missing datetimes
-                            elif journal_dtypes[col] == float:
-                                master_journal_df[col] = 0.0
-                            elif journal_dtypes[col] == bool:
-                                master_journal_df[col] = False
-                            else:
-                                master_journal_df[col] = np.nan
+                            reindexed_journal[col] = loaded_journal_df[col]
+                        # Apply migration logic for consolidated fields here as well during a refresh from DB
+                        elif col == "HTF Context":
+                            # Assuming old 'Weekly Bias', 'Daily Bias', '4H Structure', '1H Structure' existed in user_data_loaded for existing trades.
+                            weekly_bias = loaded_journal_df.get("Weekly Bias", pd.Series("")).astype(str)
+                            daily_bias = loaded_journal_df.get("Daily Bias", pd.Series("")).astype(str)
+                            h4_structure = loaded_journal_df.get("4H Structure", pd.Series("")).astype(str)
+                            h1_structure = loaded_journal_df.get("1H Structure", pd.Series("")).astype(str)
+                            reindexed_journal[col] = [", ".join(filter(None, [
+                                f"W:{wb}" if wb and wb != 'None' else '', f"D:{db}" if db and db != 'None' else '',
+                                f"4H:{h4}" if h4 and h4 != 'None' else '', f"1H:{h1}" if h1 and h1 != 'None' else ''
+                            ])) for wb, db, h4, h1 in zip(weekly_bias, daily_bias, h4_structure, h1_structure)]
+                        elif col == "Trade Setup":
+                            setup_name = loaded_journal_df.get("Setup Name", pd.Series("")).astype(str)
+                            indicators_used = loaded_journal_df.get("Indicators Used", pd.Series("")).astype(str)
+                            entry_trigger = loaded_journal_df.get("Entry Trigger", pd.Series("")).astype(str)
+                            reindexed_journal[col] = ["; ".join(filter(None, [
+                                f"Setup: {sn}" if sn and sn != 'None' else '',
+                                f"Indicators: {iu}" if iu and iu != 'None' else '',
+                                f"Trigger: {et}" if et and et != 'None' else ''
+                            ])) for sn, iu, et in zip(setup_name, indicators_used, entry_trigger)]
+                        elif col == "Entry Rationale":
+                            val = loaded_journal_df.get("Reasons for Entry", loaded_journal_df.get("Entry Conditions", pd.Series('')))
+                            reindexed_journal[col] = val.apply(lambda x: json.loads(x).get('text', x) if isinstance(x, str) and x.strip().startswith('{') else x).fillna('')
+                        elif col == "Exit Rationale":
+                            val = loaded_journal_df.get("Reasons for Exit", pd.Series(''))
+                            reindexed_journal[col] = val.apply(lambda x: json.loads(x).get('text', x) if isinstance(x, str) and x.strip().startswith('{') else x).fillna('')
+                        elif col == "Trade Journal Notes":
+                            notes_old = loaded_journal_df.get("Notes/Journal", pd.Series(''))
+                            pta_old = loaded_journal_df.get("Post-Trade Analysis", pd.Series(''))
+                            ll_old = loaded_journal_df.get("Lessons Learned", pd.Series(''))
+                            adjustments_old = loaded_journal_df.get("Adjustments", pd.Series(''))
+                            def extract_clean_text_local(cell_value): # Use local version if needed
+                                try:
+                                    if isinstance(cell_value, str) and cell_value.strip().startswith('{'):
+                                        return json.loads(cell_value).get('text', '').strip()
+                                    return cell_value.strip() if isinstance(cell_value, str) else ""
+                                except json.JSONDecodeError: return cell_value.strip() if isinstance(cell_value, str) else ""
 
-                    # Enforce dtypes and fill any remaining NaNs in string columns
-                    for col, dtype in journal_dtypes.items():
-                        if dtype == str:
-                            master_journal_df[col] = master_journal_df[col].fillna('').astype(str)
-                        elif 'datetime' in str(dtype):
-                            master_journal_df[col] = pd.to_datetime(master_journal_df[col], errors='coerce')
-                        elif dtype == float:
-                            master_journal_df[col] = pd.to_numeric(master_journal_df[col], errors='coerce').fillna(0.0).astype(float)
-                        elif dtype == bool:
-                            master_journal_df[col] = master_journal_df[col].fillna(False).astype(bool)
-                        else: # Fallback for other dtypes
-                            master_journal_df[col] = master_journal_df[col].astype(dtype, errors='ignore')
+                            combined_notes_series_local = []
+                            for i in loaded_journal_df.index:
+                                parts = []
+                                n_val = extract_clean_text_local(notes_old.loc[i])
+                                p_val = extract_clean_text_local(pta_old.loc[i])
+                                l_val = extract_clean_text_local(ll_old.loc[i])
+                                a_val = extract_clean_text_local(adjustments_old.loc[i])
+                                if n_val: parts.append(f"**General Notes:**\n{n_val}")
+                                if p_val: parts.append(f"**Post-Trade Analysis:**\n{p_val}")
+                                if l_val: parts.append(f"**Lessons Learned:**\n{l_val}")
+                                if a_val: parts.append(f"**Adjustments:**\n{a_val}")
+                                combined_notes_series_local.append("\n\n---\n\n".join(filter(None, parts)))
+                            reindexed_journal[col] = combined_notes_series_local
+                        elif col == "Entry Screenshot":
+                            old_ss = loaded_journal_df.get("Entry Screenshot Link/Hash", pd.Series("")).astype(str).str.split(',', expand=True)
+                            reindexed_journal[col] = old_ss[0].fillna("") if not old_ss.empty and 0 in old_ss.columns else ""
+                        elif col == "Exit Screenshot":
+                            old_ss = loaded_journal_df.get("Entry Screenshot Link/Hash", pd.Series("")).astype(str).str.split(',', expand=True)
+                            reindexed_journal[col] = old_ss[1].fillna("") if not old_ss.empty and 1 in old_ss.columns else ""
+                        else: # Any other simple column migration for names that directly match new schema
+                             reindexed_journal[col] = loaded_journal_df.get(col, pd.Series("", index=loaded_journal_df.index)) # Default to empty Series matching index size.
+                    
+                    # Ensure all dtypes after populating from old data/defaults
+                    for col_name, dtype in journal_dtypes.items():
+                        if col_name in reindexed_journal.columns:
+                            if dtype == str: reindexed_journal[col_name] = reindexed_journal[col_name].fillna('').astype(str)
+                            elif 'datetime' in str(dtype): reindexed_journal[col_name] = pd.to_datetime(reindexed_journal[col_name], errors='coerce')
+                            elif dtype == float: reindexed_journal[col_name] = pd.to_numeric(reindexed_journal[col_name], errors='coerce').fillna(0.0).astype(float)
+                            elif dtype == bool: reindexed_journal[col_name] = reindexed_journal[col_name].fillna(False).astype(bool)
+                            else: reindexed_journal[col_name] = reindexed_journal[col_name].astype(dtype, errors='ignore')
+                        else: # This scenario means the migration logic itself failed to provide the column
+                            # Very unlikely with current robust migration. Should have been handled above
+                            logging.error(f"Column '{col_name}' was not found in reindexed_journal after complex migration for refresh. Adding with default.")
+                            if dtype == str: reindexed_journal[col_name] = ""
+                            elif 'datetime' in str(dtype): reindexed_journal[col_name] = pd.NaT
+                            elif dtype == float: reindexed_journal[col_name] = 0.0
+                            elif dtype == bool: reindexed_journal[col_name] = False
 
-                    st.session_state.tools_trade_journal = master_journal_df
+                    st.session_state.tools_trade_journal = reindexed_journal[journal_cols]
                     
                     st.success("Account synced successfully!")
-                    logging.info(f"Account synced for {username}. Drawings and Journal updated.")
+                    logging.info(f"Account synced for {username}. Drawings and Journal updated from DB.")
                 else:
                     st.error("Failed to sync account.")
-                    logging.error(f"No user data found for {username}")
+                    logging.error(f"No user data found in DB for {username} to sync.")
                 st.rerun()
             except Exception as e:
                 st.error(f"Failed to sync account: {str(e)}")
-                logging.error(f"Error syncing account for {username}: {str(e)}")
+                logging.error(f"Error syncing account for {username}: {str(e)}", exc_info=True)
     
     # Check for saved drawings from postMessage
     drawings_key = f"bt_drawings_key_{pair}"
@@ -621,7 +698,7 @@ if "logged_in_user" in st.session_state:
         if content and isinstance(content, dict) and content:
             username = st.session_state.logged_in_user
             try:
-                # Use local 'c' for this standalone file
+                # Use local 'c' from global scope
                 c.execute("SELECT data FROM users WHERE username = ?", (username,))
                 result = c.fetchone()
                 user_data = json.loads(result[0]) if result else {}
@@ -633,17 +710,17 @@ if "logged_in_user" in st.session_state:
                 logging.info(f"Drawings saved to database for {pair}: {content}")
             except Exception as e:
                 st.error(f"Failed to save drawings: {str(e)}")
-                logging.error(f"Database error saving drawings for {pair}: {str(e)}")
+                logging.error(f"Database error saving drawings for {pair}: {str(e)}", exc_info=True)
             finally:
-                # Clean up the session state flags
                 if drawings_key in st.session_state: del st.session_state[drawings_key]
                 if f"bt_save_trigger_{pair}" in st.session_state: del st.session_state[f"bt_save_trigger_{pair}"]
         else:
             st.warning("No valid drawing content received. Ensure you have drawn on the chart.")
             logging.warning(f"No valid drawing content received for {pair}: {content}")
-else:
-    st.info("Sign in via the My Account tab to save/load drawings and trading journal. (Currently mocked in this test file)")
-    logging.info("User not logged in, save/load drawings disabled")
+else: # If user is not logged in (e.g., initial run without mock, or explicit logout in full app)
+    st.info("Log in to save/load drawings and trading journal. (Test user auto-logged in for this standalone file.)")
+    logging.info("User not logged in, drawing/journal features disabled.")
+
 
 st.markdown("### 📝 Simplified Trading Journal")
 st.markdown(
@@ -657,7 +734,7 @@ st.markdown(
 tab_entry, tab_analytics, tab_history = st.tabs(["📝 Log Trade", "📊 Analytics", "📜 Trade History"])
 
 # =========================================================
-# LOG TRADE TAB (UX Friendly Redesign)
+# LOG TRADE TAB (UX Friendly Redesign - Simplified Core)
 # =========================================================
 with tab_entry:
     st.subheader("Log a New Trade (Essential Information)")
@@ -667,7 +744,7 @@ with tab_entry:
 
     with st.form("trade_entry_form", clear_on_submit=not is_editing):
         # --- Section: General Trade Info ---
-        st.markdown("### General Trade Info")
+        st.markdown("### Trade Essentials")
         
         cols_overview_1, cols_overview_2 = st.columns(2)
         with cols_overview_1:
@@ -677,14 +754,14 @@ with tab_entry:
             entry_time_val = initial_data.get("Entry Time", dt.datetime.now())
             exit_time_val = initial_data.get("Exit Time", dt.datetime.now())
 
-            trade_date = st.date_input("Date", value=trade_date_val.date() if isinstance(trade_date_val, dt.datetime) else trade_date_val, help="The calendar date of your trade.", key="trade_date_input")
-            entry_time = st.time_input("Entry Time", value=entry_time_val.time() if isinstance(entry_time_val, dt.datetime) else entry_time_val, help="The time you entered the trade.", key="entry_time_input")
-            exit_time = st.time_input("Exit Time", value=exit_time_val.time() if isinstance(exit_time_val, dt.datetime) else exit_time_val, help="The time you exited the trade.", key="exit_time_input")
+            trade_date = st.date_input("Date", value=trade_date_val.date() if isinstance(trade_date_val, (dt.datetime, dt.date)) else dt.date.today(), help="The calendar date of your trade.", key="trade_date_input")
+            entry_time = st.time_input("Entry Time", value=entry_time_val.time() if isinstance(entry_time_val, (dt.datetime, dt.time)) else dt.time(9,0), help="The time you entered the trade.", key="entry_time_input")
+            exit_time = st.time_input("Exit Time", value=exit_time_val.time() if isinstance(exit_time_val, (dt.datetime, dt.time)) else dt.time(17,0), help="The time you exited the trade.", key="exit_time_input")
         
         with cols_overview_2:
             symbol_options = list(pairs_map.keys()) + ["Other"]
             default_symbol = initial_data.get("Symbol", pair)
-            default_symbol_idx = symbol_options.index(default_symbol) if default_symbol in symbol_options else (symbol_options.index("Other") if default_symbol != "" else 0)
+            default_symbol_idx = symbol_options.index(default_symbol) if default_symbol in symbol_options else (symbol_options.index("Other") if "Other" in symbol_options else 0)
             symbol = st.selectbox("Currency Pair / Asset", symbol_options, index=default_symbol_idx, help="The asset you traded.", key="symbol_input")
             if symbol == "Other":
                 symbol = st.text_input("Specify Custom Asset", value=initial_data.get("Symbol", ""), help="Enter asset name if not in list.", key="custom_symbol_input")
@@ -692,107 +769,108 @@ with tab_entry:
             trade_type = st.radio("Trade Direction", ["Long", "Short", "Breakeven", "No-Trade (Study)"], horizontal=True, 
                                   index=["Long", "Short", "Breakeven", "No-Trade (Study)"].index(initial_data.get("Trade Type", "Long")), 
                                   help="Was this a buy, sell, a trade that broke even, or just a study/watch entry?", key="trade_type_input")
-                                  
+                                      
             lots = st.number_input("Position Size (Lots)", min_value=0.01, step=0.01, format="%.2f", value=float(initial_data.get("Lots", 0.1)), help="The size of your trade in lots.", key="lots_input")
             entry_price = st.number_input("Entry Price", min_value=0.0, step=0.00001, format="%.5f", value=float(initial_data.get("Entry Price", 0.0)), help="The price you entered the market.", key="entry_price_input")
             stop_loss_price = st.number_input("Stop Loss Price", min_value=0.0, step=0.00001, format="%.5f", value=float(initial_data.get("Stop Loss Price", 0.0)), help="The price where your stop loss was placed.", key="stop_loss_price_input")
             take_profit_price = st.number_input("Take Profit Price", min_value=0.0, step=0.00001, format="%.5f", value=float(initial_data.get("Take Profit Price", 0.0)), help="The price where your take profit was placed.", key="take_profit_price_input")
             final_exit_price = st.number_input("Final Exit Price", min_value=0.0, step=0.00001, format="%.5f", value=float(initial_data.get("Final Exit Price", 0.0)), help="The actual price your trade was closed.", key="final_exit_price_input")
-        
+            
         st.markdown("---")
 
-        # --- Section: Optional Trade Details ---
-        with st.expander("More Trade Details (Optional)", expanded=False):
-            cols_more_details_1, cols_more_details_2 = st.columns(2)
-
-            with cols_more_details_1:
-                st.markdown("#### Context & Strategy")
-                user_strategies = ["(Select One)"] + sorted([s['Name'] for s in st.session_state.strategies.to_dict('records')] if "strategies" in st.session_state and not st.session_state.strategies.empty else [])
-                default_strategy_idx = user_strategies.index(initial_data.get("Strategy Used", "(Select One)")) if initial_data.get("Strategy Used", "(Select One)") in user_strategies else 0
-                selected_strategy = st.selectbox("Strategy Used", options=user_strategies, index=default_strategy_idx, help="Link this trade to one of your defined strategies.", key="strategy_used_input")
-                
-                htf_bias_structure = st.text_area("Higher Timeframe Bias & Structure", value=initial_data.get("HTF Bias & Structure", ""), height=80,
-                                                  help="E.g., 'Weekly Bullish, Daily Corrective, 4H Impulse'", key="htf_bias_structure_input")
-                market_state = st.selectbox("Market State (HTF)", ["Trend (Bullish)", "Trend (Bearish)", "Range", "Complex Pullback", "Choppy", "Undefined"], 
-                                            index=["Trend (Bullish)", "Trend (Bearish)", "Range", "Complex Pullback", "Choppy", "Undefined"].index(initial_data.get("Market State (HTF)", "Undefined")), help="Dominant market condition.", key="market_state_input")
-                
-                news_impact_options = ["High Impact (Positive)", "High Impact (Negative)", "Medium Impact", "Low Impact", "None"]
-                initial_news_impact = initial_data.get("News Event Impact", "").split(',') if initial_data.get("News Event Impact") else []
-                news_impact = st.multiselect("News Event Impact", news_impact_options, 
-                                             default=[ni for ni in initial_news_impact if ni in news_impact_options], help="How upcoming or recent news events influenced your trade decision.", key="news_impact_input")
-                
-                setup_details = st.text_area("Setup Details & Entry Trigger", value=initial_data.get("Setup Details", ""), height=80,
-                                             help="E.g., 'Double Bottom, RSI Divergence. Entry: Pin bar close on 5min.'", key="setup_details_input")
-
-            with cols_more_details_2:
-                st.markdown("#### Psychological & Visuals")
-                pre_trade_mindset = st.text_area("Pre-Trade Mindset", value=initial_data.get("Pre-Trade Mindset", ""), height=80,
-                                                 help="How were you feeling and what was your plan going into the trade?", key="pre_trade_mindset_input")
-                
-                in_trade_emotions_options = ["Confident", "Anxious", "Fearful", "Excited", "Frustrated", "Neutral", "FOMO", "Greedy", "Revenge", "Impulsive", "Disciplined", "Overconfident", "Patient", "Irritable"]
-                initial_in_trade_emotions = initial_data.get("In-Trade Emotions", "").split(',') if initial_data.get("In-Trade Emotions") else []
-                in_trade_emotions = st.multiselect(
-                    "In-Trade Emotions",
-                    in_trade_emotions_options, default=[e for e in initial_in_trade_emotions if e in in_trade_emotions_options],
-                    help="Select emotions experienced during the trade.", key="in_trade_emotions_input"
-                )
-                discipline_score = st.slider("Discipline Score (1=Low, 5=High)", 1, 5, value=int(initial_data.get("Discipline Score 1-5", 3)), help="Rate your adherence to your plan and discipline.", key="discipline_score_input")
-
-                user_journal_images_dir = os.path.join(_ta_user_dir(st.session_state.get("logged_in_user", "guest")), "journal_images")
-                os.makedirs(user_journal_images_dir, exist_ok=True) 
-                entry_ss_initial_val = initial_data.get("Entry Screenshot", "")
-                exit_ss_initial_val = initial_data.get("Exit Screenshot", "")
-                
-                uploaded_entry_image = st.file_uploader("Upload Entry Screenshot (Optional)", type=["png", "jpg", "jpeg"], help="Upload an image of your chart at entry.", key="upload_entry_screenshot")
-                if uploaded_entry_image:
-                    image_filename = f"{trade_id_input}_entry_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png" # Unique filename
-                    image_file_path = os.path.join(user_journal_images_dir, image_filename)
-                    with open(image_file_path, "wb") as f:
-                        f.write(uploaded_entry_image.getbuffer())
-                    entry_ss_initial_val = image_file_path # Update the value to be saved
-                    st.success("Entry screenshot uploaded!")
-
-                uploaded_exit_image = st.file_uploader("Upload Exit Screenshot (Optional)", type=["png", "jpg", "jpeg"], help="Upload an image of your chart at exit.", key="upload_exit_screenshot")
-                if uploaded_exit_image:
-                    image_filename = f"{trade_id_input}_exit_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png" # Unique filename
-                    image_file_path = os.path.join(user_journal_images_dir, image_filename)
-                    with open(image_file_path, "wb") as f:
-                        f.write(uploaded_exit_image.getbuffer())
-                    exit_ss_initial_val = image_file_path # Update the value to be saved
-                    st.success("Exit screenshot uploaded!")
-
-                entry_screenshot_storage = st.text_input("Entry Screenshot (Saved Path)", value=entry_ss_initial_val, key="entry_screenshot_storage_hidden", label_visibility="hidden")
-                exit_screenshot_storage = st.text_input("Exit Screenshot (Saved Path)", value=exit_ss_initial_val, key="exit_screenshot_storage_hidden", label_visibility="hidden")
+        # --- Section: Trade Reflection & Notes (Simplified & Consolidated) ---
+        st.markdown("### Your Trade Story & Insights")
         
-        st.markdown("---")
-
-        # --- Section: Trade Reflection & Notes ---
-        with st.expander("Trade Reflection & Notes (Key Learnings)", expanded=True):
-            st.markdown("Document your thoughts, reasons for entry/exit, and lessons learned using **Markdown**.")
-            
-            cols_notes_1, cols_notes_2 = st.columns(2)
-            with cols_notes_1:
-                entry_rationale = st.text_area("Entry Rationale", value=initial_data.get("Entry Rationale", ""), height=150, 
-                                               help="Why did you enter this trade? (e.g., trend confirmation, divergence).", key="entry_rationale_input")
-                exit_rationale = st.text_area("Exit Rationale", value=initial_data.get("Exit Rationale", ""), height=150, 
-                                              help="Why did you exit the trade? (e.g., hit TP, hit SL, discretionary).", key="exit_rationale_input")
-            
-            with cols_notes_2:
-                trade_journal_notes = st.text_area("Overall Trade Notes & Learning", value=initial_data.get("Trade Journal Notes", ""), height=250, 
-                                                   help="Combine post-trade analysis, lessons learned, and any strategy adjustments here.", key="trade_journal_notes_input")
+        col_rationale, col_notes = st.columns(2)
+        with col_rationale:
+            entry_rationale = st.text_area("Entry Rationale", value=initial_data.get("Entry Rationale", ""), height=150, 
+                                           help="Why did you enter this trade? Include relevant setup, context, and triggers (Markdown supported).", key="entry_rationale_input")
+            exit_rationale = st.text_area("Exit Rationale", value=initial_data.get("Exit Rationale", ""), height=150, 
+                                          help="Why did you exit the trade? (e.g., hit TP/SL, discretionary, change in bias) (Markdown supported).", key="exit_rationale_input")
+        
+        with col_notes:
+            trade_journal_notes = st.text_area("Overall Notes & Learnings", value=initial_data.get("Trade Journal Notes", ""), height=250, 
+                                               help="Use this section for post-trade analysis, emotional reflection, lessons learned, and strategy adjustments. (Markdown supported).", key="trade_journal_notes_input")
             
             current_tags_in_journal = sorted(list(set(st.session_state.tools_trade_journal['Tags'].str.split(',').explode().dropna().astype(str).str.strip())))
             suggested_tags = ["Strategy: Breakout", "Strategy: Reversal", "Mistake: FOMO", "Mistake: Overleveraged", 
-                              "Emotion: Fear", "Emotion: Greed", "Session: London", "Session: New York"]
+                              "Emotion: Fear", "Emotion: Greed", "Session: London", "Session: New York", "Pattern: Head/Shoulders", "Trend: Bullish"]
             all_tag_options = sorted(list(set(current_tags_in_journal + suggested_tags)))
             initial_tags = initial_data.get("Tags", "").split(',') if initial_data.get("Tags") else []
             tags = st.multiselect("Trade Tags", all_tag_options, 
                                   default=[t for t in initial_tags if t in all_tag_options], help="Categorize your trade for easier analysis.", key="tags_input")
 
+        st.markdown("---")
 
-        # Clear edit state after form is rendered with initial_data
-        if is_editing:
-            pass # The deletion will happen after successful form submission
+        # --- Section: More Optional Details (Advanced, Hidden by Default) ---
+        with st.expander("More Details (Optional)", expanded=False):
+            st.markdown("For deeper analysis, capture additional context about your trade.")
+            
+            col_advanced_1, col_advanced_2 = st.columns(2)
+            with col_advanced_1:
+                st.markdown("#### Market Context")
+                user_strategies = ["(Select One)"] + sorted([s['Name'] for s in st.session_state.strategies.to_dict('records')] if "strategies" in st.session_state and not st.session_state.strategies.empty else [])
+                default_strategy_idx = user_strategies.index(initial_data.get("Strategy Used", "(Select One)")) if initial_data.get("Strategy Used", "(Select One)") in user_strategies else 0
+                # Using unique keys by appending `_opt` for optional fields to differentiate from essential fields above
+                selected_strategy_opt = st.selectbox("Strategy Used", options=user_strategies, index=default_strategy_idx, help="Link this trade to one of your defined strategies.", key="strategy_used_input_opt") 
+                
+                htf_context = st.text_area("Higher Timeframe Context", value=initial_data.get("HTF Context", ""), height=80,
+                                              help="Summarize HTF bias, structure. E.g., 'Weekly Bullish trend, Daily corrective pullback'.", key="htf_context_input_opt")
+                market_state = st.selectbox("Overall Market State", ["Trend (Bullish)", "Trend (Bearish)", "Range", "Complex Pullback", "Choppy", "Undefined"], 
+                                            index=["Trend (Bullish)", "Trend (Bearish)", "Range", "Complex Pullback", "Choppy", "Undefined"].index(initial_data.get("Market State (HTF)", "Undefined")), help="Dominant market condition.", key="market_state_input_opt")
+                
+                news_impact_options = ["High Impact (Positive)", "High Impact (Negative)", "Medium Impact", "Low Impact", "None"]
+                initial_news_impact_opt = initial_data.get("News Event Impact", "").split(',') if initial_data.get("News Event Impact") else []
+                news_impact_opt = st.multiselect("News Event Impact", news_impact_options, 
+                                             default=[ni for ni in initial_news_impact_opt if ni in news_impact_options], help="How upcoming or recent news events influenced your trade decision.", key="news_impact_input_opt")
+                
+                trade_setup = st.text_area("Trade Setup Details", value=initial_data.get("Trade Setup", ""), height=80,
+                                             help="Specific setup like 'Engulfing candle on S/R' or 'MA Cross and Breakout'.", key="trade_setup_input_opt")
+
+            with col_advanced_2:
+                st.markdown("#### Psychology & Visuals")
+                pre_trade_mindset_opt = st.text_area("Pre-Trade Mindset (detailed)", value=initial_data.get("Pre-Trade Mindset", ""), height=80,
+                                                 help="Detailed thoughts and emotional state before the trade.", key="pre_trade_mindset_input_opt")
+                
+                in_trade_emotions_options = ["Confident", "Anxious", "Fearful", "Excited", "Frustrated", "Neutral", "FOMO", "Greedy", "Revenge", "Impulsive", "Disciplined", "Overconfident", "Patient", "Irritable"]
+                initial_in_trade_emotions_opt = initial_data.get("In-Trade Emotions", "").split(',') if initial_data.get("In-Trade Emotions") else []
+                in_trade_emotions_opt = st.multiselect(
+                    "In-Trade Emotions (detailed)",
+                    in_trade_emotions_options, default=[e for e in initial_in_trade_emotions_opt if e in in_trade_emotions_options],
+                    help="Select emotions experienced during the trade.", key="in_trade_emotions_input_opt"
+                )
+                discipline_score_opt = st.slider("Discipline Score (1=Low, 5=High)", 1, 5, value=int(initial_data.get("Discipline Score 1-5", 3)), help="Rate your adherence to your plan and discipline.", key="discipline_score_input_opt")
+
+                user_journal_images_dir = os.path.join(_ta_user_dir(st.session_state.get("logged_in_user", "guest")), "journal_images")
+                os.makedirs(user_journal_images_dir, exist_ok=True) 
+                entry_ss_initial_val_opt = initial_data.get("Entry Screenshot", "")
+                exit_ss_initial_val_opt = initial_data.get("Exit Screenshot", "")
+                
+                uploaded_entry_image_opt = st.file_uploader("Upload Entry Screenshot", type=["png", "jpg", "jpeg"], help="Upload an image of your chart at entry.", key="upload_entry_screenshot_opt")
+                if uploaded_entry_image_opt:
+                    image_filename = f"{trade_id_input}_entry_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png" 
+                    image_file_path = os.path.join(user_journal_images_dir, image_filename)
+                    with open(image_file_path, "wb") as f:
+                        f.write(uploaded_entry_image_opt.getbuffer())
+                    entry_ss_initial_val_opt = image_file_path 
+                    st.success("Entry screenshot uploaded!")
+
+                uploaded_exit_image_opt = st.file_uploader("Upload Exit Screenshot", type=["png", "jpg", "jpeg"], help="Upload an image of your chart at exit.", key="upload_exit_screenshot_opt")
+                if uploaded_exit_image_opt:
+                    image_filename = f"{trade_id_input}_exit_{dt.datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+                    image_file_path = os.path.join(user_journal_images_dir, image_filename)
+                    with open(image_file_path, "wb") as f:
+                        f.write(uploaded_exit_image_opt.getbuffer())
+                    exit_ss_initial_val_opt = image_file_path
+                    st.success("Exit screenshot uploaded!")
+
+                # These hidden inputs ensure that the last uploaded path (or existing path when editing) is passed.
+                entry_screenshot_storage_opt = st.text_input("Entry Screenshot (Saved Path Hidden)", value=entry_ss_initial_val_opt, key="entry_screenshot_storage_hidden_opt", label_visibility="hidden")
+                exit_screenshot_storage_opt = st.text_input("Exit Screenshot (Saved Path Hidden)", value=exit_ss_initial_val_opt, key="exit_screenshot_storage_hidden_opt", label_visibility="hidden")
+            
+            # Reset edit_trade_data state only after successful submission if it's an edit action.
+            # No explicit del needed here. It happens after successful submission.
+
 
         st.markdown("---")
         submit_button = st.form_submit_button(
@@ -803,22 +881,22 @@ with tab_entry:
     
         if submit_button:
             # --- Calculations for derived fields ---
-            pip_multiplier = 0 # default, will be set below
-            approx_pip_value_usd_per_lot = 0.0 # default, will be set below
-            pip_scale = 0.0 # default, will be set below
+            pip_multiplier = 0 
+            approx_pip_value_usd_per_lot = 0.0 
+            pip_scale = 0.0 
 
             if "JPY" in symbol:
                 pip_multiplier = 100
-                approx_pip_value_usd_per_lot = 8.5 # Rough average for JPY pairs ($/std lot/pip)
+                approx_pip_value_usd_per_lot = 8.5 
                 pip_scale = 0.01 
-            else: # Most other pairs like EUR/USD, GBP/USD
+            else: 
                 pip_multiplier = 10000 
-                approx_pip_value_usd_per_lot = 10.0 # Rough average for non-JPY pairs ($/std lot/pip)
+                approx_pip_value_usd_per_lot = 10.0 
                 pip_scale = 0.0001 
             
             trade_pips_gain = 0.0
             pnL_dollars = 0.0
-            win_loss_status = "No-Trade (Study)" # Default for clarity if calculations fail or type is 'Study'
+            win_loss_status = "No-Trade (Study)"
 
             if trade_type in ["Long", "Short"]:
                 if entry_price > 0.0 and final_exit_price > 0.0:
@@ -827,7 +905,7 @@ with tab_entry:
                     elif trade_type == "Short":
                         trade_pips_gain = (entry_price - final_exit_price) / pip_scale
                     
-                    pnL_dollars = trade_pips_gain * lots * (approx_pip_value_usd_per_lot)
+                    pnL_dollars = trade_pips_gain * lots * approx_pip_value_usd_per_lot
 
                     if pnL_dollars > 0.0:
                         win_loss_status = "Win"
@@ -875,20 +953,21 @@ with tab_entry:
                 "Pips": trade_pips_gain,
                 "Initial R": initial_r_calc,
                 "Realized R": realized_r_calc,
-                "Strategy Used": selected_strategy if selected_strategy != "(Select One)" else "",
-                "HTF Bias & Structure": htf_bias_structure,
-                "Market State (HTF)": market_state,
-                "News Event Impact": ','.join(news_impact),
-                "Setup Details": setup_details,
-                "Entry Rationale": entry_rationale,
-                "Exit Rationale": exit_rationale,
-                "Pre-Trade Mindset": pre_trade_mindset,
-                "In-Trade Emotions": ','.join(in_trade_emotions),
-                "Discipline Score 1-5": float(discipline_score),
-                "Trade Journal Notes": trade_journal_notes,
-                "Entry Screenshot": entry_screenshot_storage,
-                "Exit Screenshot": exit_screenshot_storage,
-                "Tags": ','.join(tags)
+                # Essential fields in Optional block map back to main schema. Prioritize if edited.
+                "Strategy Used": st.session_state.get('strategy_used_input_opt', selected_strategy if selected_strategy != "(Select One)" else ""), 
+                "HTF Context": st.session_state.get('htf_context_input_opt', ""),
+                "Market State (HTF)": st.session_state.get('market_state_input_opt', "Undefined"),
+                "News Event Impact": ','.join(st.session_state.get('news_impact_input_opt', [])),
+                "Trade Setup": st.session_state.get('trade_setup_input_opt', ""),
+                "Entry Rationale": entry_rationale, # From essential section
+                "Exit Rationale": exit_rationale,   # From essential section
+                "Pre-Trade Mindset": st.session_state.get('pre_trade_mindset_input_opt', ""),
+                "In-Trade Emotions": ','.join(st.session_state.get('in_trade_emotions_input_opt', [])),
+                "Discipline Score 1-5": float(st.session_state.get('discipline_score_input_opt', 3)),
+                "Trade Journal Notes": trade_journal_notes, # From essential section
+                "Entry Screenshot": st.session_state.get('entry_screenshot_storage_hidden_opt', ""),
+                "Exit Screenshot": st.session_state.get('exit_screenshot_storage_hidden_opt', ""),
+                "Tags": ','.join(tags) # From essential section
             }
 
             new_trade_df_row = pd.DataFrame([new_trade_data])
@@ -921,9 +1000,8 @@ with tab_entry:
             # Save to database if user is logged in
             if 'logged_in_user' in st.session_state:
                 username = st.session_state.logged_in_user
-                # Using local 'conn' and 'c' here.
                 if _ta_save_journal(username, st.session_state.tools_trade_journal, conn, c):
-                    ta_update_xp(10) # 10 XP per trade log
+                    ta_update_xp(10)
                     ta_update_streak()
                     logging.info(f"Trade {'updated' if is_editing else 'logged'} and saved to database for user {username} with ID {trade_id_input}")
                 else:
@@ -932,6 +1010,7 @@ with tab_entry:
                 st.warning("Trade saved locally (not synced to account, please log in to save).")
                 logging.info("Trade logged for anonymous user")
             
+            # Clear edit state after successful form submission and rerun
             if 'edit_trade_data' in st.session_state:
                 del st.session_state['edit_trade_data']
             st.rerun()
@@ -1195,7 +1274,7 @@ with tab_analytics:
                 if "In-Trade Emotions" in df_analytics.columns and not df_analytics["In-Trade Emotions"].str.strip().eq("").all():
                     df_emo_perf = df_analytics[df_analytics["In-Trade Emotions"] != ""].copy()
                     df_emo_perf["Emotion"] = df_emo_perf["In-Trade Emotions"].str.split(',').explode().str.strip()
-                    df_emo_perf = df_emo_perf[df_emo_perf["Emotion"] != ""].copy() # Remove empty strings from exploded results
+                    df_emo_perf = df_emo_perf[df_emo_perf["Emotion"] != ""].copy()
                     
                     if not df_emo_perf.empty:
                         df_emo_grouped = df_emo_perf.groupby("Emotion").agg(
@@ -1259,39 +1338,24 @@ with tab_history:
 
         selected_trade_id = None
         try:
-            # Assuming format "DATE - SYMBOL (TRADE_ID) (WIN/LOSS: $PNL)"
-            # Find the index of the first '(' and last ')' that are part of Trade ID
-            # It's in the second to last parenthesis.
-            # Example: 2025-09-06 16:02 - EUR/USD (TRD-abcde12345) (Win: $100.00)
-            # Find the string ' (TRD-...' then split and get the ID.
-            id_start_idx = selected_trade_display.rfind('(') # Find the last '('.
-            if id_start_idx != -1:
-                id_end_idx = selected_trade_display.rfind(')', 0, id_start_idx) # Find ')' before it
-                if id_end_idx != -1:
-                    trade_id_section = selected_trade_display[id_end_idx + 1:id_start_idx].strip()
-                    selected_trade_id = trade_id_section.strip('()')
-                else: # Fallback if second-to-last parenthesis parsing fails, maybe it's the very first?
-                     selected_trade_id_parts = selected_trade_display.split('(')
-                     if len(selected_trade_id_parts) > 1:
-                         selected_trade_id = selected_trade_id_parts[-2].strip(') ').strip()
-
-            if not selected_trade_id: # Still not found, try a simpler split
-                 selected_trade_id_parts = selected_trade_display.split('(')
-                 if len(selected_trade_id_parts) > 1:
-                    selected_trade_id = selected_trade_id_parts[-2].strip(') ').strip()
-
+            # Robust Trade ID parsing using regex
+            trade_id_match = re.search(r'\((TRD-[a-fA-F0-9]+)\)', selected_trade_display)
+            if trade_id_match:
+                selected_trade_id = trade_id_match.group(1)
+            else:
+                 logging.warning(f"Trade ID pattern not found in display string: {selected_trade_display}")
         except Exception as e:
             logging.error(f"Error parsing trade ID from display string '{selected_trade_display}': {e}", exc_info=True)
             st.error("Could not parse Trade ID from the selected entry. Please select another trade.")
 
         selected_trade_row = None
-        trade_idx_in_df = None # Initialize to None
+        trade_idx_in_df = None
 
         if selected_trade_id:
             matching_rows = df_history[df_history['Trade ID'] == selected_trade_id]
             if not matching_rows.empty:
                 selected_trade_row = matching_rows.iloc[0]
-                trade_idx_in_df = matching_rows.index[0] # Original index for update/delete
+                trade_idx_in_df = matching_rows.index[0] 
             else:
                 st.warning(f"Trade with ID `{selected_trade_id}` not found in journal. It might have been deleted.")
 
@@ -1333,26 +1397,24 @@ with tab_history:
                 cols_pricing_ex.write(f"**Final Exit Price:** {selected_trade_row['Final Exit Price']:.5f}")
                 
                 cols_lots_type.write(f"**Lots:** {selected_trade_row['Lots']:.2f}")
-                # These were old columns. Removed now, so just fallback to N/A
-                cols_lots_type.write(f"**Original Order Type:** {selected_trade_row.get('Order Type', 'N/A')}")
-                cols_lots_type.write(f"**Original Partial Exits:** {'Yes' if selected_trade_row.get('Partial Exits', False) else 'No'}")
+                cols_lots_type.write(f"**Trade Type (Direction):** {selected_trade_row['Trade Type']}")
 
 
             # --- Section: Market & Strategy Context ---
             with st.expander("🌍 Market & Strategy Context"):
-                st.write(f"**Higher Timeframe Bias & Structure:** {selected_trade_row['HTF Bias & Structure']}")
+                st.write(f"**Higher Timeframe Context:** {selected_trade_row['HTF Context']}")
                 st.write(f"**Market State (HTF):** {selected_trade_row['Market State (HTF)']}")
                 st.write(f"**News Event Impact:** {selected_trade_row['News Event Impact'].replace(',', ', ')}")
-                st.write(f"**Setup Details & Entry Trigger:** {selected_trade_row['Setup Details']}")
+                st.write(f"**Trade Setup Details:** {selected_trade_row['Trade Setup']}")
                 
 
             # --- Section: Rationale & Visuals ---
             with st.expander("📝 Rationale & Visuals"):
                 st.markdown("##### Entry Rationale:")
-                st.markdown(render_markdown_content(selected_trade_row["Entry Rationale"]), unsafe_allow_html=True)
+                st.markdown(render_markdown_content(selected_trade_row["Entry Rationale"]))
                 
                 st.markdown("##### Exit Rationale:")
-                st.markdown(render_markdown_content(selected_trade_row["Exit Rationale"]), unsafe_allow_html=True)
+                st.markdown(render_markdown_content(selected_trade_row["Exit Rationale"]))
                 
                 entry_screenshot_link = selected_trade_row['Entry Screenshot'] if pd.notna(selected_trade_row['Entry Screenshot']) else ""
                 exit_screenshot_link = selected_trade_row['Exit Screenshot'] if pd.notna(selected_trade_row['Exit Screenshot']) else ""
@@ -1380,8 +1442,6 @@ with tab_history:
             with st.expander("🧠 Psychological Factors"):
                 st.write(f"**Pre-Trade Mindset:** {selected_trade_row['Pre-Trade Mindset']}")
                 st.write(f"**In-Trade Emotions:** {selected_trade_row['In-Trade Emotions'].replace(',', ', ')}")
-                # Emotional Triggers field from prior complex version. Keep fallback.
-                st.write(f"**Emotional Triggers (Original):** {selected_trade_row.get('Emotional Triggers', 'N/A')}")
                 st.write(f"**Discipline Score:** {selected_trade_row['Discipline Score 1-5']:.0f}/5")
 
             # --- Section: Combined Journal Notes & Tags ---
@@ -1395,7 +1455,6 @@ with tab_history:
             col_review_buttons_final = st.columns(2)
             with col_review_buttons_final[0]:
                 if st.button("Edit This Trade", key=f"edit_trade_history_{selected_trade_row['Trade ID']}", type="primary"):
-                    # Prepare data for pre-filling, convert datetime to Python objects expected by date_input/time_input
                     trade_data_to_edit = selected_trade_row.to_dict()
                     # Convert pandas NaT to None or Python None
                     for key in ["Date", "Entry Time", "Exit Time"]:
@@ -1408,13 +1467,15 @@ with tab_history:
                     st.session_state.edit_trade_data = trade_data_to_edit
 
                     st.info(f"Form pre-filled for Trade ID `{selected_trade_row['Trade ID']}`. Please go to the **Log Trade** tab to modify.")
+                    # A rerunning of the app ensures the new session state (edit_trade_data) is picked up
                     st.rerun() 
 
             with col_review_buttons_final[1]:
                 if st.button("Delete This Trade", key=f"delete_trade_history_{selected_trade_row['Trade ID']}"):
-                    if trade_idx_in_df is not None: # Ensure a valid index was found
+                    if trade_idx_in_df is not None:
                         st.session_state.tools_trade_journal = st.session_state.tools_trade_journal.drop(index=trade_idx_in_df).reset_index(drop=True)
                         if 'logged_in_user' in st.session_state:
+                            # Using global conn, c for database interaction
                             _ta_save_journal(st.session_state.logged_in_user, st.session_state.tools_trade_journal, conn, c)
                         st.success("Trade deleted successfully!")
                         st.rerun()
@@ -1426,7 +1487,7 @@ with tab_history:
     else:
         st.info("No trades logged yet. Add trades in the 'Log Trade' tab.")
             
-# Challenge Mode (remains unchanged)
+# Challenge Mode 
 st.markdown("---")
 st.subheader("🏅 Challenge Mode")
 st.write("30-Day Journaling Discipline Challenge - Gain 300 XP for completing, XP can be exchanged for gift cards!")
@@ -1436,22 +1497,22 @@ st.progress(progress)
 if progress >= 1.0 and st.session_state.get('challenge_30day_completed', False) == False:
     st.success("Challenge completed! Great job on your consistency.")
     if 'logged_in_user' in st.session_state:
-        ta_update_xp(300) # Bonus XP for completion
-    st.session_state.challenge_30day_completed = True # Ensure XP is only given once
+        ta_update_xp(300) 
+    st.session_state.challenge_30day_completed = True 
 elif progress >= 1.0:
     st.info("You've already completed this challenge!")
 
-# Leaderboard / Self-Competition (remains largely unchanged)
+# Leaderboard / Self-Competition 
 st.subheader("🏆 Leaderboard - Consistency")
-if 'logged_in_user' in st.session_state: # Only attempt to load leaderboard if we have a connection
+if 'logged_in_user' in st.session_state: 
     users_from_db = c.execute("SELECT username, data FROM users").fetchall()
     leader_data = []
     for u, d in users_from_db:
         user_d = json.loads(d) if d else {}
         journal_entries = user_d.get("tools_trade_journal", [])
-        if isinstance(journal_entries, list): # Check if it's a list of dicts (actual rows)
+        if isinstance(journal_entries, list): 
             trade_count = sum(1 for entry in journal_entries if entry.get("Win/Loss") in ["Win", "Loss", "Breakeven", "Pending / Invalid Prices"])
-        else: # Fallback for any unexpected/older formats
+        else:
             trade_count = 0
             logging.warning(f"Journal data for user {u} is not in expected list format. Entries will not be counted.")
         leader_data.append({"Username": u, "Journaled Trades": trade_count})
@@ -1462,4 +1523,4 @@ if 'logged_in_user' in st.session_state: # Only attempt to load leaderboard if w
     else:
         st.info("No leaderboard data yet. Log some trades!")
 else:
-    st.info("Log in to view the Leaderboard. (Mocked login enabled in this test file.)")
+    st.info("Log in to view the Leaderboard. (Test user auto-logged in for this standalone file.)")
