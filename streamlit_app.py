@@ -263,8 +263,9 @@ with tab_entry:
     st.caption("Focus on a quick, essential entry. You can add detailed notes and screenshots later in the Playbook.")
 
     with st.form("trade_entry_form", clear_on_submit=True):
-        st.markdown("##### ⚡ 30-Second Journal Entry")
-        col1, col2, col3, col4 = st.columns(4)
+        st.markdown("##### ⚡ Trade Entry Details")
+        col1, col2, col3 = st.columns(3) # Adjusted to 3 columns
+
         with col1:
             date_val = st.date_input("Date", dt.date.today())
             symbol_options = list(pairs_map.keys()) + ["Other"]
@@ -274,54 +275,63 @@ with tab_entry:
             direction = st.radio("Direction", ["Long", "Short"], horizontal=True)
             lots = st.number_input("Size (Lots)", min_value=0.01, max_value=1000.0, value=0.10, step=0.01, format="%.2f")
         with col3:
-            # CORRECTED: Using keyword arguments to fix the crash
             entry_price = st.number_input("Entry Price", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
             stop_loss = st.number_input("Stop Loss", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
-        with col4:
+        
+        st.markdown("---")
+        st.markdown("##### Trade Results & Metrics")
+        res_col1, res_col2, res_col3 = st.columns(3) # New 3-column row for results
+
+        with res_col1:
             final_exit = st.number_input("Final Exit Price", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
             outcome = st.selectbox("Outcome", ["Win", "Loss", "Breakeven", "No Trade/Study"])
         
+        with res_col2:
+            manual_pnl_input = st.number_input("Manual PnL ($)", value=0.0, format="%.2f", help="Enter the profit/loss amount manually.")
+        
+        with res_col3:
+            manual_rr_input = st.number_input("Manual Risk:Reward (R)", value=0.0, format="%.2f", help="Enter the risk-to-reward ratio manually.")
+        
+        calculate_pnl_rr = st.checkbox("Calculate PnL/RR from Entry/Stop/Exit Prices", value=False, 
+                                       help="Check this to automatically calculate PnL and R:R based on prices entered above, overriding manual inputs.")
+
         with st.expander("Add Quick Rationale & Tags (Optional)"):
             entry_rationale = st.text_area("Why did you enter this trade?", height=100)
             all_tags = sorted(list(set(st.session_state.trade_journal['Tags'].str.split(',').explode().dropna().str.strip())))
             suggested_tags = ["Breakout", "Reversal", "Trend Follow", "Counter-Trend", "News Play", "FOMO", "Over-leveraged"]
             tags = st.multiselect("Trade Tags", options=sorted(list(set(all_tags + suggested_tags))))
 
-        # --- NEW MANUAL PNL/RR ENTRY ---
-        with st.expander("Manually Override PnL and Risk:Reward (Optional)"):
-            override_pnl_rr = st.checkbox("Override calculated PnL and R:R", value=False)
-            # Use 'disabled' to control input fields based on the checkbox
-            manual_pnl_input = st.number_input("Manual PnL ($)", value=0.0, format="%.2f", disabled=not override_pnl_rr)
-            manual_rr_input = st.number_input("Manual Risk:Reward (R)", value=0.0, format="%.2f", disabled=not override_pnl_rr)
-        # --- END NEW MANUAL PNL/RR ENTRY ---
-
         submitted = st.form_submit_button("Save Trade", type="primary", use_container_width=True)
         if submitted:
-            pnl_calculated, rr_calculated = 0.0, 0.0 # Initialize calculated values
+            final_pnl, final_rr = 0.0, 0.0 # Initialize final values
 
-            # Calculate PnL and RR if not overridden
-            if not override_pnl_rr:
+            if calculate_pnl_rr:
                 risk_per_unit = abs(entry_price - stop_loss) if stop_loss > 0 else 0
                 
                 if outcome in ["Win", "Loss"]:
                     # Assuming a fixed pip value calculation for FX (standard lot: 100,000 units, 4-decimal pair: 0.0001)
                     # This might need adjustment for other asset types or if your "lots" imply something else
                     pnl_calculated = ((final_exit - entry_price) if direction == "Long" else (entry_price - final_exit)) * lots * 100000 * 0.0001
-                
+                else:
+                    pnl_calculated = 0.0 # Breakeven or No Trade/Study has 0 PnL
+
                 if risk_per_unit > 0:
                     pnl_per_unit_abs = abs(final_exit - entry_price)
-                    # RR calculation: (profit/loss per unit) / (risk per unit)
                     rr_calculated = (pnl_per_unit_abs / risk_per_unit) if pnl_calculated >= 0 else -(pnl_per_unit_abs / risk_per_unit)
+                else:
+                    rr_calculated = 0.0 # Cannot calculate R:R without a defined stop loss
 
-            # Assign final PnL and RR based on override status
-            final_pnl = manual_pnl_input if override_pnl_rr else pnl_calculated
-            final_rr = manual_rr_input if override_pnl_rr else rr_calculated
+                final_pnl = pnl_calculated
+                final_rr = rr_calculated
+            else:
+                final_pnl = manual_pnl_input
+                final_rr = manual_rr_input
 
             new_trade_data = {
                 "TradeID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
                 "Symbol": symbol, "Direction": direction, "Outcome": outcome,
                 "Lots": lots, "EntryPrice": entry_price, "StopLoss": stop_loss, "FinalExit": final_exit,
-                "PnL": final_pnl, "RR": final_rr, # Use final_pnl and final_rr
+                "PnL": final_pnl, "RR": final_rr, 
                 "Tags": ','.join(tags), "EntryRationale": entry_rationale,
                 "Strategy": '', "TradeJournalNotes": '', "EntryScreenshot": '', "ExitScreenshot": ''
             }
