@@ -186,35 +186,36 @@ if 'logged_in_user' not in st.session_state:
 # =========================================================
 # JOURNAL SCHEMA & ROBUST DATA MIGRATION (REVISED)
 # =========================================================
+# CLEANED UP SCHEMA with safe names for columns
 journal_cols = [
-    "Trade ID", "Date", "Symbol", "Direction", "Outcome", "PnL", "RR", 
-    "Strategy", "Tags", "Entry Price", "Stop Loss", "Final Exit", "Lots",
-    "Entry Rationale", "Trade Journal Notes", "Entry Screenshot", "Exit Screenshot"
+    "TradeID", "Date", "Symbol", "Direction", "Outcome", "PnL", "RR", 
+    "Strategy", "Tags", "EntryPrice", "StopLoss", "FinalExit", "Lots",
+    "EntryRationale", "TradeJournalNotes", "EntryScreenshot", "ExitScreenshot"
 ]
 journal_dtypes = {
-    "Trade ID": str, "Date": "datetime64[ns]", "Symbol": str, "Direction": str, 
+    "TradeID": str, "Date": "datetime64[ns]", "Symbol": str, "Direction": str, 
     "Outcome": str, "PnL": float, "RR": float, "Strategy": str, 
-    "Tags": str, "Entry Price": float, "Stop Loss": float, "Final Exit": float, "Lots": float,
-    "Entry Rationale": str, "Trade Journal Notes": str, 
-    "Entry Screenshot": str, "Exit Screenshot": str
+    "Tags": str, "EntryPrice": float, "StopLoss": float, "FinalExit": float, "Lots": float,
+    "EntryRationale": str, "TradeJournalNotes": str, 
+    "EntryScreenshot": str, "ExitScreenshot": str
 }
 
 if 'trade_journal' not in st.session_state:
     user_data = get_user_data(st.session_state.logged_in_user)
-    # The key is 'trade_journal' now, not 'tools_trade_journal'
     journal_data = user_data.get("trade_journal", [])
     df = pd.DataFrame(journal_data)
     
-    # Safely migrate data to the new schema
+    # Safely migrate data to the new, safer schema
+    legacy_col_map = {
+        "Trade ID": "TradeID", "Entry Price": "EntryPrice", "Stop Loss": "StopLoss",
+        "Final Exit": "FinalExit", "PnL ($)": "PnL", "R:R": "RR",
+        "Entry Rationale": "EntryRationale", "Trade Journal Notes": "TradeJournalNotes",
+        "Entry Screenshot": "EntryScreenshot", "Exit Screenshot": "ExitScreenshot"
+    }
+    df.rename(columns=legacy_col_map, inplace=True)
+
     for col, dtype in journal_dtypes.items():
-        # Check for legacy column names during migration
-        legacy_col_map = {"PnL": "PnL ($)", "RR": "R:R"}
-        legacy_col = legacy_col_map.get(col)
-        
-        if col not in df.columns and legacy_col and legacy_col in df.columns:
-            df.rename(columns={legacy_col: col}, inplace=True) # Rename old column
-        
-        elif col not in df.columns: # If new column doesn't exist at all
+        if col not in df.columns:
             if dtype == str: df[col] = ''
             elif 'datetime' in str(dtype): df[col] = pd.NaT
             elif dtype == float: df[col] = 0.0
@@ -271,12 +272,13 @@ with tab_entry:
             if symbol == "Other": symbol = st.text_input("Custom Symbol")
         with col2:
             direction = st.radio("Direction", ["Long", "Short"], horizontal=True)
-            lots = st.number_input("Size (Lots)", 0.01, 1000.0, 0.10, 0.01, "%.2f")
+            lots = st.number_input("Size (Lots)", min_value=0.01, max_value=1000.0, value=0.10, step=0.01, format="%.2f")
         with col3:
-            entry_price = st.number_input("Entry Price", 0.0, None, 0.0, "%.5f")
-            stop_loss = st.number_input("Stop Loss", 0.0, None, 0.0, "%.5f")
+            # CORRECTED: Using keyword arguments to fix the crash
+            entry_price = st.number_input("Entry Price", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
+            stop_loss = st.number_input("Stop Loss", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
         with col4:
-            final_exit = st.number_input("Final Exit Price", 0.0, None, 0.0, "%.5f")
+            final_exit = st.number_input("Final Exit Price", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
             outcome = st.selectbox("Outcome", ["Win", "Loss", "Breakeven", "No Trade/Study"])
         
         with st.expander("Add Quick Rationale & Tags (Optional)"):
@@ -298,12 +300,12 @@ with tab_entry:
                 rr = (pnl_per_unit / risk_per_unit) if pnl >= 0 else -(pnl_per_unit / risk_per_unit)
 
             new_trade_data = {
-                "Trade ID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
+                "TradeID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
                 "Symbol": symbol, "Direction": direction, "Outcome": outcome,
-                "Lots": lots, "Entry Price": entry_price, "Stop Loss": stop_loss, "Final Exit": final_exit,
+                "Lots": lots, "EntryPrice": entry_price, "StopLoss": stop_loss, "FinalExit": final_exit,
                 "PnL": pnl, "RR": rr,
-                "Tags": ','.join(tags), "Entry Rationale": entry_rationale,
-                "Strategy": '', "Trade Journal Notes": '', "Entry Screenshot": '', "Exit Screenshot": ''
+                "Tags": ','.join(tags), "EntryRationale": entry_rationale,
+                "Strategy": '', "TradeJournalNotes": '', "EntryScreenshot": '', "ExitScreenshot": ''
             }
             new_df = pd.DataFrame([new_trade_data])
             st.session_state.trade_journal = pd.concat([st.session_state.trade_journal, new_df], ignore_index=True)
@@ -311,7 +313,7 @@ with tab_entry:
             if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
                 ta_update_xp(st.session_state.logged_in_user, 10)
                 ta_update_streak(st.session_state.logged_in_user)
-                st.success(f"Trade {new_trade_data['Trade ID']} logged successfully!")
+                st.success(f"Trade {new_trade_data['TradeID']} logged successfully!")
             st.rerun()
 
 # --- TAB 2: TRADE PLAYBOOK ---
@@ -324,11 +326,11 @@ with tab_playbook:
         st.caption("Filter and review your past trades to refine your strategy and identify patterns.")
         
         filter_cols = st.columns([1, 1, 1, 2])
-        outcome_filter = filter_cols[0].multiselect("Filter by Outcome", options=df_playbook['Outcome'].unique(), default=df_playbook['Outcome'].unique())
-        symbol_filter = filter_cols[1].multiselect("Filter by Symbol", options=df_playbook['Symbol'].unique(), default=df_playbook['Symbol'].unique())
-        direction_filter = filter_cols[2].multiselect("Filter by Direction", options=df_playbook['Direction'].unique(), default=df_playbook['Direction'].unique())
+        outcome_filter = filter_cols[0].multiselect("Filter Outcome", df_playbook['Outcome'].unique(), default=df_playbook['Outcome'].unique())
+        symbol_filter = filter_cols[1].multiselect("Filter Symbol", df_playbook['Symbol'].unique(), default=df_playbook['Symbol'].unique())
+        direction_filter = filter_cols[2].multiselect("Filter Direction", df_playbook['Direction'].unique(), default=df_playbook['Direction'].unique())
         tag_options = sorted(list(set(df_playbook['Tags'].str.split(',').explode().dropna().str.strip())))
-        tag_filter = filter_cols[3].multiselect("Filter by Tag", options=tag_options)
+        tag_filter = filter_cols[3].multiselect("Filter Tag", options=tag_options)
         
         filtered_df = df_playbook[
             (df_playbook['Outcome'].isin(outcome_filter)) &
@@ -349,16 +351,12 @@ with tab_playbook:
                 """, unsafe_allow_html=True)
 
                 metric_cols = st.columns(3)
-                pnl_value = row['PnL']
-                rr_value = row['RR']
-                lots_value = row['Lots']
+                metric_cols[0].metric("Net PnL", f"${row['PnL']:.2f}")
+                metric_cols[1].metric("R-Multiple", f"{row['RR']:.2f}R")
+                metric_cols[2].metric("Position Size", f"{row['Lots']:.2f} lots")
                 
-                metric_cols[0].metric("Net PnL", f"${pnl_value:.2f}")
-                metric_cols[1].metric("R-Multiple", f"{rr_value:.2f}R")
-                metric_cols[2].metric("Position Size", f"{lots_value:.2f} lots")
-                
-                if row['Entry Rationale']:
-                    st.markdown(f"**Entry Rationale:** *{row['Entry Rationale']}*")
+                if row['EntryRationale']:
+                    st.markdown(f"**Entry Rationale:** *{row['EntryRationale']}*")
                 if row['Tags']:
                     tags_list = [f"`{tag.strip()}`" for tag in str(row['Tags']).split(',') if tag.strip()]
                     st.markdown(f"**Tags:** {', '.join(tags_list)}")
@@ -397,8 +395,8 @@ with tab_analytics:
         chart_cols = st.columns(2)
         with chart_cols[0]:
             st.subheader("Cumulative PnL")
-            df_analytics['Cumulative PnL'] = df_analytics['PnL'].cumsum()
-            fig_equity = px.area(df_analytics, x='Date', y='Cumulative PnL', title="Your Equity Curve", template="plotly_dark")
+            df_analytics['CumulativePnL'] = df_analytics['PnL'].cumsum()
+            fig_equity = px.area(df_analytics, x='Date', y='CumulativePnL', title="Your Equity Curve", template="plotly_dark")
             fig_equity.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22")
             st.plotly_chart(fig_equity, use_container_width=True)
             
