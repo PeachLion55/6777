@@ -1,20 +1,3 @@
-An updated version of your Streamlit code is provided below. The following key features have been implemented as requested:
-
-Trade Notes: Each trade in the "Trade Playbook" now has an expander section titled "Add/View Journal Notes & Actions" where users can write and save detailed notes using Markdown.
-
-Remove Trade & XP Penalty: A "Delete Trade" button has been added within the new actions section. Clicking this button will remove the trade permanently from the journal and apply a -10 XP penalty to the user's account.
-
-Custom Tag Creation: The "Log New Trade" form now includes a text input field allowing users to type in their own custom tags (comma-separated), in addition to selecting from the list of existing ones.
-
-UI Refinement: The horizontal line that previously appeared within the content of each trade card has been removed to create a cleaner look. A separator is now used between each distinct trade card.
-
-Here is the complete, modified code:
-
-code
-Python
-download
-content_copy
-expand_less
 
 # =========================================================
 # IMPORTS
