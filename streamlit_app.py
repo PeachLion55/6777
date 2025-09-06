@@ -415,52 +415,42 @@ def save_uploaded_file(uploaded_file, filename):
 def calculate_pnl_rr(symbol, direction, entry_price, stop_loss, final_exit, lots, outcome):
     pnl, rr = 0.0, 0.0
     
-    if entry_price == 0 or final_exit == 0:
+    if entry_price == 0 or final_exit == 0 or lots == 0:
         return pnl, rr # Cannot calculate if prices are zero
 
     # Determine pip value based on symbol
-    pip_size = 0.0001
-    contract_size = 100000 # Standard lot for FX
-
-    if "JPY" in symbol.upper():
-        pip_size = 0.01
-        contract_size = 100000
-    elif "XAU" in symbol.upper() or "GOLD" in symbol.upper():
-        pip_size = 0.01 # Price movement per cent
-        contract_size = 100 # Contract size for Gold (e.g., XAUUSD futures or spot)
-    elif "BTC" in symbol.upper() or "ETH" in symbol.upper() or "CRYPTO" in symbol.upper():
-        pip_size = 1 # For crypto, move by whole units
-        contract_size = 1 # Typically 1 unit per lot for crypto
-
-    # PnL Calculation
-    if outcome in ["Win", "Loss"]:
-        price_diff = (final_exit - entry_price)
-        if direction == "Short":
-            price_diff *= -1
-        
-        if "XAU" in symbol.upper(): # Gold in USD terms, so 1 lot = 100 oz
-            pnl = price_diff * lots * contract_size
-        elif "JPY" in symbol.upper(): # JPY pairs, pip value is usually $1 per 0.01 move per standard lot
-            pnl = (price_diff / pip_size) * lots * (contract_size / 100000) * 10 # This needs better specific handling
-            # A more robust formula for JPY: (final_exit - entry_price) * 100,000 * lots / current_USDJPY_rate
-            # For simplicity, keeping it general, but highlighting complexity
-        elif "BTC" in symbol.upper() or "ETH" in symbol.upper():
-             pnl = price_diff * lots # Assuming lots is number of crypto units
-        else: # Standard FX
-            pnl = (price_diff / pip_size) * lots * 10 # 10 USD per standard lot per pip
-            
-        # Simplified for demonstration. Real PnL calculation is highly instrument-specific.
-        # Let's use a simpler, more generic one that still shows directionality.
-        pnl = (final_exit - entry_price) * lots * (10000 if "JPY" not in symbol.upper() else 100) # Arbitrary multiplier for effect
-        if direction == "Short": pnl *= -1
+    # This is a simplified example. Real-world platforms use contract sizes and exact pip values.
+    # For FX, 1 lot (100,000 units) typically means $10 per pip for major USD pairs.
+    # JPY pairs: 1 lot means ~¥1000 per pip, or ~$10 per pip.
+    # XAUUSD (Gold): 1 lot (100 oz) means $1 per 0.01 price movement.
     
+    # Generic PnL Calculation (simplified for demonstration)
+    # Assume a base value per "point" movement, multiplied by lots.
+    # For a real app, this would be highly dependent on the instrument's contract specifications.
+    
+    price_diff = (final_exit - entry_price)
+    if direction == "Short":
+        price_diff *= -1
+
+    # A very simplified multiplier. You'd replace this with actual contract value logic.
+    if "JPY" in symbol.upper():
+        multiplier = 10000 # Example for JPY pairs (e.g. 0.01 move is 1 unit of profit, x 100,000 units / lot)
+    elif "XAU" in symbol.upper() or "GOLD" in symbol.upper():
+        multiplier = 100 # Example for Gold (e.g., 100 oz per standard lot)
+    elif "BTC" in symbol.upper() or "ETH" in symbol.upper() or "CRYPTO" in symbol.upper():
+        multiplier = 1 # For crypto, often 1 unit per lot
+    else: # Default for most other FX
+        multiplier = 100000 # Standard lot size value
+        
+    pnl = price_diff * lots * multiplier 
+
     # R:R Calculation
     if stop_loss > 0 and entry_price > 0:
         risk_per_unit = abs(entry_price - stop_loss)
         if risk_per_unit > 0:
-            potential_reward_per_unit = abs(final_exit - entry_price)
-            rr = (potential_reward_per_unit / risk_per_unit)
-            if pnl < 0: rr *= -1 # Indicate negative R:R for losses
+            reward_per_unit = abs(final_exit - entry_price) # Absolute reward
+            rr = (reward_per_unit / risk_per_unit)
+            if pnl < 0: rr = -rr # Assign negative R:R for losing trades
     
     return pnl, rr
 
@@ -797,7 +787,7 @@ with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.em
                         <button class="stButton" style="background-color:#21262d; border-color:#30363d; color:#c9d1d9;" onclick="window.parent.document.querySelector('[data-testid=\\"stExpander-Playbook-{trade_id}\\"] button').click()">
                             {'✏️ Edit Details' if 'editing_trade_id' in st.session_state and st.session_state.editing_trade_id == trade_id else '👁️ View/Edit Details'}
                         </button>
-                        <button class="stButton red-button" style="color:white;" onclick="window.parent.document.querySelector('[data-testid=\\"stButton-DeleteConfirmation-{trade_id}\\"]').click()">
+                        <button class="stButton red-button" style="color:white;" onclick="if(confirm('Are you sure you want to delete trade {trade_id}? This action cannot be undone.')) {{ window.parent.document.querySelector('[data-testid=\\"stButton-DeleteConfirmation-{trade_id}\\"]').click(); }}">
                             🗑️ Delete
                         </button>
                     </div>
@@ -805,17 +795,16 @@ with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.em
                 """, unsafe_allow_html=True)
                 
                 # Hidden delete confirmation button (activated by JS above)
-                if st.button("Confirm Delete", key=f"DeleteConfirmation-{trade_id}", type="secondary", help="Click to confirm deletion", disabled=True):
-                    # Only execute if the confirmation is truly clicked, not just rerunning
-                    if st.session_state[f"DeleteConfirmation-{trade_id}"]: # This is a trick to ensure the button was actually pressed
-                        st.session_state.trade_journal = st.session_state.trade_journal.drop(index).reset_index(drop=True)
-                        if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
-                            st.success(f"Trade {trade_id} deleted successfully.")
-                            if row['EntryScreenshot'] and os.path.exists(row['EntryScreenshot']): os.remove(row['EntryScreenshot'])
-                            if row['ExitScreenshot'] and os.path.exists(row['ExitScreenshot']): os.remove(row['ExitScreenshot'])
-                        else:
-                            st.error(f"Failed to delete trade {trade_id}.")
-                        st.rerun() # Rerun to update the display
+                # This button is functionally hidden by the CSS, but its presence allows the JS confirm to trigger it.
+                if st.button("Delete (Hidden Confirmation)", key=f"DeleteConfirmation-{trade_id}", type="secondary", help="This button is triggered by the 'Delete' button in the card via JavaScript for confirmation.", disabled=True):
+                    st.session_state.trade_journal = st.session_state.trade_journal.drop(index).reset_index(drop=True)
+                    if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
+                        st.success(f"Trade {trade_id} deleted successfully.")
+                        if row['EntryScreenshot'] and os.path.exists(row['EntryScreenshot']): os.remove(row['EntryScreenshot'])
+                        if row['ExitScreenshot'] and os.path.exists(row['ExitScreenshot']): os.remove(row['ExitScreenshot'])
+                    else:
+                        st.error(f"Failed to delete trade {trade_id}.")
+                    st.rerun() 
 
                 # Expander for full trade details and editing
                 expander_key = f"Playbook-{trade_id}"
@@ -834,8 +823,246 @@ with tab_playbook if st.session_state.current_tab == "trade_playbook" else st.em
                         edit_cols_1 = st.columns(4)
                         with edit_cols_1[0]:
                             edit_date = st.date_input("Date", value=edit_trade_data['Date'].date(), key=f"edit_date_{trade_id}")
-                            edit_symbol_options = sorted(list(pairs_map.keys())) + ["Other", edit_trade_data['Symbol']]
-                            edit_symbol_selected = st.selectbox("Symbol", edit_symbol_options, index=edit_symbol_options.index(edit_trade_data['Symbol']) if edit_trade_data['Symbol'] in edit_symbol_options else len(pairs_map.keys()) + 1, key=f"edit_symbol_select_{trade_id}")
+                            edit_symbol_options = sorted(list(pairs_map.keys())) + ["Other"]
+                            # Default to the current symbol, or "Other" if it's a custom one not in pairs_map
+                            initial_symbol_index = 0
+                            if edit_trade_data['Symbol'] in edit_symbol_options:
+                                initial_symbol_index = edit_symbol_options.index(edit_trade_data['Symbol'])
+                            elif edit_trade_data['Symbol']: # If it's a custom symbol, pre-select "Other"
+                                initial_symbol_index = edit_symbol_options.index("Other")
+
+                            edit_symbol_selected = st.selectbox("Symbol", edit_symbol_options, index=initial_symbol_index, key=f"edit_symbol_select_{trade_id}")
                             edit_symbol = edit_symbol_selected
                             if edit_symbol_selected == "Other":
-                                edit_custom_symbol = st.text_input("Enter Custom Symbol", value=edit_trade_data['Symb
+                                # Corrected line:
+                                edit_custom_symbol = st.text_input("Enter Custom Symbol", value=edit_trade_data['Symbol'] if edit_trade_data['Symbol'] not in pairs_map.keys() and edit_trade_data['Symbol'] else "", key=f"edit_custom_symbol_{trade_id}").upper()
+                                edit_symbol = edit_custom_symbol if edit_custom_symbol else ""
+
+                        with edit_cols_1[1]:
+                            edit_direction = st.radio("Direction", ["Long", "Short"], horizontal=True, index=["Long", "Short"].index(edit_trade_data['Direction']), key=f"edit_direction_{trade_id}")
+                            edit_lots = st.number_input("Lots", value=float(edit_trade_data['Lots']), min_value=0.01, step=0.01, format="%.2f", key=f"edit_lots_{trade_id}")
+                        with edit_cols_1[2]:
+                            edit_entry_price = st.number_input("Entry Price", value=float(edit_trade_data['EntryPrice']), min_value=0.0, step=0.00001, format="%.5f", key=f"edit_entry_price_{trade_id}")
+                            edit_stop_loss = st.number_input("Stop Loss", value=float(edit_trade_data['StopLoss']), min_value=0.0, step=0.00001, format="%.5f", key=f"edit_stop_loss_{trade_id}")
+                        with edit_cols_1[3]:
+                            edit_final_exit = st.number_input("Final Exit Price", value=float(edit_trade_data['FinalExit']), min_value=0.0, step=0.00001, format="%.5f", key=f"edit_final_exit_{trade_id}")
+                            edit_outcome = st.selectbox("Outcome", ["Win", "Loss", "Breakeven", "No Trade/Study"], index=["Win", "Loss", "Breakeven", "No Trade/Study"].index(edit_trade_data['Outcome']), key=f"edit_outcome_{trade_id}")
+                        
+                        edit_cols_2 = st.columns(2)
+                        with edit_cols_2[0]:
+                            edit_all_strategies = sorted(list(set(st.session_state.trade_journal['Strategy'].dropna().astype(str).str.strip())))
+                            
+                            current_strategy_idx = 0
+                            if edit_trade_data['Strategy'] in edit_all_strategies:
+                                current_strategy_idx = edit_all_strategies.index(edit_trade_data['Strategy']) + 1 # +1 for empty option
+                            
+                            edit_strategy_input = st.selectbox("Strategy Used", options=[''] + edit_all_strategies + ["_Add New Strategy_"], index=current_strategy_idx, key=f"edit_strategy_select_{trade_id}")
+                            edit_strategy = edit_strategy_input
+                            if edit_strategy_input == "_Add New Strategy_":
+                                edit_strategy = st.text_input("Enter New Strategy Name", value="", key=f"edit_custom_strategy_{trade_id}")
+                            if not edit_strategy and edit_trade_data['Strategy']: # If new strategy is empty, keep old
+                                edit_strategy = edit_trade_data['Strategy']
+                            
+                            edit_entry_rationale = st.text_area("Entry Rationale", value=edit_trade_data['EntryRationale'], height=100, key=f"edit_entry_rationale_{trade_id}")
+                            
+                            edit_all_tags = sorted(list(set(df_playbook['Tags'].str.split(',').explode().dropna().str.strip())))
+                            current_tags = [tag.strip() for tag in str(edit_trade_data['Tags']).split(',') if tag.strip()]
+                            edit_tags = st.multiselect("Tags", options=edit_all_tags, default=current_tags, key=f"edit_tags_{trade_id}")
+
+                        with edit_cols_2[1]:
+                            edit_notes = st.text_area("Detailed Trade Journal Notes (Markdown supported)", value=edit_trade_data['TradeJournalNotes'], height=200, key=f"edit_notes_{trade_id}")
+
+                        st.markdown("##### 📸 Screenshots")
+                        screenshot_cols = st.columns(2)
+                        
+                        entry_ss_path = edit_trade_data['EntryScreenshot']
+                        exit_ss_path = edit_trade_data['ExitScreenshot']
+
+                        with screenshot_cols[0]:
+                            st.caption("Entry Screenshot")
+                            if entry_ss_path and os.path.exists(entry_ss_path):
+                                st.image(load_image(entry_ss_path), caption="Current Entry Screenshot", use_column_width=True)
+                                if st.button("Delete Entry Screenshot", key=f"del_entry_ss_{trade_id}", type="secondary", use_container_width=True):
+                                    os.remove(entry_ss_path)
+                                    edit_trade_data['EntryScreenshot'] = ''
+                                    st.session_state.trade_journal.loc[st.session_state.trade_journal['TradeID'] == trade_id, 'EntryScreenshot'] = ''
+                                    st.success("Entry screenshot deleted.")
+                                    if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
+                                        st.rerun()
+                            new_entry_ss = st.file_uploader("Upload New Entry Screenshot", type=["png", "jpg", "jpeg"], key=f"new_entry_ss_{trade_id}")
+                        
+                        with screenshot_cols[1]:
+                            st.caption("Exit Screenshot")
+                            if exit_ss_path and os.path.exists(exit_ss_path):
+                                st.image(load_image(exit_ss_path), caption="Current Exit Screenshot", use_column_width=True)
+                                if st.button("Delete Exit Screenshot", key=f"del_exit_ss_{trade_id}", type="secondary", use_container_width=True):
+                                    os.remove(exit_ss_path)
+                                    edit_trade_data['ExitScreenshot'] = ''
+                                    st.session_state.trade_journal.loc[st.session_state.trade_journal['TradeID'] == trade_id, 'ExitScreenshot'] = ''
+                                    st.success("Exit screenshot deleted.")
+                                    if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
+                                        st.rerun()
+                            new_exit_ss = st.file_uploader("Upload New Exit Screenshot", type=["png", "jpg", "jpeg"], key=f"new_exit_ss_{trade_id}")
+
+
+                        submit_edit_cols = st.columns(2)
+                        if submit_edit_cols[0].form_submit_button("Update Trade", type="primary", use_container_width=True):
+                            if not edit_symbol or edit_entry_price == 0.0 or edit_final_exit == 0.0 or edit_lots == 0.0:
+                                st.error("Please ensure all required fields are filled to update the trade.")
+                            else:
+                                updated_pnl, updated_rr = calculate_pnl_rr(edit_symbol, edit_direction, edit_entry_price, edit_stop_loss, edit_final_exit, edit_lots, edit_outcome)
+
+                                entry_ss_path_final = edit_trade_data['EntryScreenshot']
+                                if new_entry_ss is not None:
+                                    if entry_ss_path and os.path.exists(entry_ss_path): os.remove(entry_ss_path)
+                                    entry_filename = f"{trade_id}_entry_{uuid.uuid4().hex[:4]}{os.path.splitext(new_entry_ss.name)[1]}"
+                                    entry_ss_path_final = save_uploaded_file(new_entry_ss, entry_filename)
+                                    st.toast("Entry screenshot uploaded!")
+
+                                exit_ss_path_final = edit_trade_data['ExitScreenshot']
+                                if new_exit_ss is not None:
+                                    if exit_ss_path and os.path.exists(exit_ss_path): os.remove(exit_ss_path)
+                                    exit_filename = f"{trade_id}_exit_{uuid.uuid4().hex[:4]}{os.path.splitext(new_exit_ss.name)[1]}"
+                                    exit_ss_path_final = save_uploaded_file(new_exit_ss, exit_filename)
+                                    st.toast("Exit screenshot uploaded!")
+
+                                trade_index = st.session_state.trade_journal[st.session_state.trade_journal['TradeID'] == trade_id].index[0]
+                                st.session_state.trade_journal.loc[trade_index] = {
+                                    "TradeID": trade_id,
+                                    "Date": pd.to_datetime(edit_date),
+                                    "Symbol": edit_symbol,
+                                    "Direction": edit_direction,
+                                    "Outcome": edit_outcome,
+                                    "PnL": updated_pnl,
+                                    "RR": updated_rr,
+                                    "Strategy": edit_strategy,
+                                    "Tags": ','.join(edit_tags) if edit_tags else '',
+                                    "EntryPrice": edit_entry_price,
+                                    "StopLoss": edit_stop_loss,
+                                    "FinalExit": edit_final_exit,
+                                    "Lots": edit_lots,
+                                    "EntryRationale": edit_entry_rationale,
+                                    "TradeJournalNotes": edit_notes,
+                                    "EntryScreenshot": entry_ss_path_final,
+                                    "ExitScreenshot": exit_ss_path_final,
+                                }
+                                if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
+                                    st.success(f"Trade {trade_id} updated successfully!")
+                                    del st.session_state.editing_trade_id # Clear editing state
+                                    st.rerun()
+                                else:
+                                    st.error(f"Failed to update trade {trade_id}.")
+
+                        if submit_edit_cols[1].form_submit_button("Cancel", use_container_width=True):
+                            if 'editing_trade_id' in st.session_state:
+                                del st.session_state.editing_trade_id
+                            st.rerun()
+
+
+# --- TAB 3: ANALYTICS DASHBOARD ---
+with tab_analytics if st.session_state.current_tab == "analytics_dashboard" else st.empty():
+    if st.session_state.current_tab == "analytics_dashboard":
+        st.header("Your Performance Dashboard")
+        df_analytics = st.session_state.trade_journal[st.session_state.trade_journal['Outcome'].isin(['Win', 'Loss'])].copy()
+        
+        if df_analytics.empty:
+            st.info("Complete at least one winning or losing trade to view your performance analytics.")
+        else:
+            # Date Range Filter for Analytics
+            min_date = df_analytics['Date'].min().date() if not df_analytics.empty else dt.date.today()
+            max_date = df_analytics['Date'].max().date() if not df_analytics.empty else dt.date.today()
+            
+            analytics_date_range = st.slider(
+                "Select Date Range for Analytics",
+                min_value=min_date,
+                max_value=max_date,
+                value=(min_date, max_date),
+                format="YYYY-MM-DD",
+                key="analytics_date_range"
+            )
+            
+            filtered_analytics_df = df_analytics[
+                (df_analytics['Date'].dt.date >= analytics_date_range[0]) &
+                (df_analytics['Date'].dt.date <= analytics_date_range[1])
+            ].copy()
+
+            if filtered_analytics_df.empty:
+                st.warning("No winning or losing trades found in the selected date range for analytics.")
+            else:
+                # High-Level KPIs
+                total_pnl = filtered_analytics_df['PnL'].sum()
+                total_trades = len(filtered_analytics_df)
+                wins = filtered_analytics_df[filtered_analytics_df['Outcome'] == 'Win']
+                losses = filtered_analytics_df[filtered_analytics_df['Outcome'] == 'Loss']
+                
+                win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+                avg_win = wins['PnL'].mean() if not wins.empty else 0
+                avg_loss = losses['PnL'].mean() if not losses.empty else 0
+                profit_factor = wins['PnL'].sum() / abs(losses['PnL'].sum()) if not losses.empty and losses['PnL'].sum() != 0 else 0
+                largest_win = wins['PnL'].max() if not wins.empty else 0
+                largest_loss = losses['PnL'].min() if not losses.empty else 0
+                avg_rr = filtered_analytics_df['RR'].mean() if not filtered_analytics_df['RR'].empty else 0
+
+                # Calculate Max Drawdown
+                filtered_analytics_df.sort_values(by='Date', inplace=True)
+                filtered_analytics_df['CumulativePnL'] = filtered_analytics_df['PnL'].cumsum()
+                filtered_analytics_df['Peak'] = filtered_analytics_df['CumulativePnL'].cummax()
+                filtered_analytics_df['Drawdown'] = filtered_analytics_df['CumulativePnL'] - filtered_analytics_df['Peak']
+                max_drawdown = filtered_analytics_df['Drawdown'].min() if not filtered_analytics_df.empty else 0
+
+                st.subheader("Key Performance Indicators")
+                kpi_cols = st.columns(6)
+                kpi_cols[0].metric("Net PnL ($)", f"${total_pnl:,.2f}", delta=f"{total_pnl:+.2f}")
+                kpi_cols[1].metric("Win Rate", f"{win_rate:.1f}%")
+                kpi_cols[2].metric("Profit Factor", f"{profit_factor:.2f}", help="Gross Profit / Gross Loss. A value > 1 indicates profitability.")
+                kpi_cols[3].metric("Avg. Win/Loss ($)", f"${avg_win:,.2f} / ${abs(avg_loss):,.2f}")
+                kpi_cols[4].metric("Largest Win ($)", f"${largest_win:,.2f}")
+                kpi_cols[5].metric("Largest Loss ($)", f"${largest_loss:,.2f}")
+                st.metric("Max Drawdown ($)", f"${max_drawdown:,.2f}", help="The largest peak-to-trough decline in your equity curve.")
+                st.metric("Average R:R", f"{avg_rr:.2f}R", help="The average Risk-Reward ratio across all trades.")
+                
+                st.markdown("---")
+
+                # Visualizations
+                st.subheader("Performance Visualizations")
+                chart_cols_1 = st.columns(2)
+                with chart_cols_1[0]:
+                    st.markdown("##### Cumulative PnL (Equity Curve)")
+                    fig_equity = px.line(filtered_analytics_df, x='Date', y='CumulativePnL', title="", template="plotly_dark", markers=True)
+                    fig_equity.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", hovermode="x unified")
+                    fig_equity.update_traces(line_color='#58a6ff', marker=dict(color='#58a6ff', size=6))
+                    st.plotly_chart(fig_equity, use_container_width=True)
+                    
+                with chart_cols_1[1]:
+                    st.markdown("##### Performance by Symbol")
+                    pnl_by_symbol = filtered_analytics_df.groupby('Symbol')['PnL'].sum().sort_values(ascending=False).reset_index()
+                    fig_pnl_symbol = px.bar(pnl_by_symbol, x='Symbol', y='PnL', title="", template="plotly_dark",
+                                            color='PnL', color_continuous_scale=px.colors.sequential.RdYlGn)
+                    fig_pnl_symbol.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", showlegend=False)
+                    st.plotly_chart(fig_pnl_symbol, use_container_width=True)
+
+                chart_cols_2 = st.columns(2)
+                with chart_cols_2[0]:
+                    st.markdown("##### Performance by Strategy")
+                    if 'Strategy' in filtered_analytics_df.columns and not filtered_analytics_df['Strategy'].astype(str).str.strip().eq('').all():
+                        pnl_by_strategy = filtered_analytics_df.groupby('Strategy')['PnL'].sum().sort_values(ascending=False).reset_index()
+                        fig_pnl_strategy = px.bar(pnl_by_strategy, x='Strategy', y='PnL', title="", template="plotly_dark",
+                                                color='PnL', color_continuous_scale=px.colors.sequential.RdYlGn)
+                        fig_pnl_strategy.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", showlegend=False)
+                        st.plotly_chart(fig_pnl_strategy, use_container_width=True)
+                    else:
+                        st.info("No strategies logged or selected in the filtered range.")
+
+                with chart_cols_2[1]:
+                    st.markdown("##### R-Multiple Distribution")
+                    if not filtered_analytics_df['RR'].isna().all() and (filtered_analytics_df['RR'] != 0).any():
+                        fig_rr_dist = px.histogram(filtered_analytics_df, x='RR', title="", template="plotly_dark",
+                                                nbins=20, color_discrete_sequence=['#58a6ff'])
+                        fig_rr_dist.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22", 
+                                                xaxis_title="R-Multiple", yaxis_title="Number of Trades")
+                        st.plotly_chart(fig_rr_dist, use_container_width=True)
+                    else:
+                        st.info("No R-Multiples available (e.g., no stop loss or entry/exit prices).")
+
+                chart_cols_3 = st.columns(2)
+           
