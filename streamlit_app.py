@@ -1,4 +1,4 @@
-# = =========================================================
+# =========================================================
 # IMPORTS
 # =========================================================
 import streamlit as st
@@ -91,7 +91,7 @@ st.markdown("""
         margin-bottom: 2rem;
     }
     .trade-notes-display {
-        background-color: #0D1117;
+        background-color: #0d1117;
         border-left: 4px solid #58a6ff;
         border-radius: 0 8px 8px 0;
         padding: 1rem 1.5rem;
@@ -181,20 +181,20 @@ def load_and_migrate_journal(username):
 
     legacy_map = {
         "Trade ID": "TradeID", "Entry Price": "EntryPrice", "Stop Loss": "StopLoss",
-        "Final Exit": "FinalExit", "PnL ($)": "PnL", "R:R": "RR",
-        "Entry Rationale": "EntryRationale", "Trade Journal Notes": "TradeJournalNotes",
-        "Entry Screenshot": "EntryScreenshot", "Exit Screenshot": "ExitScreenshot"
+        "Final Exit": "FinalExit", "PnL ($)": "PnL", "R:R": "RR", "Entry Rationale": "EntryRationale",
+        "Trade Journal Notes": "TradeJournalNotes", "Entry Screenshot": "EntryScreenshot",
+        "Exit Screenshot": "ExitScreenshot"
     }
     df.rename(columns=legacy_map, inplace=True, errors='ignore')
 
     for col, dtype in journal_dtypes.items():
         if col not in df.columns:
+            # CORRECTED: Use str(dtype) to safely check type for all cases
             if dtype == str: df[col] = ''
-            # CORRECTED: Convert dtype to string before using 'in' operator
             elif 'datetime' in str(dtype): df[col] = pd.NaT
             else: df[col] = 0.0
             
-    df = df[journal_cols]
+    df = df[journal_cols] # Ensure column order
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
     for col in ["PnL", "RR", "EntryPrice", "StopLoss", "FinalExit", "Lots"]:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
@@ -225,7 +225,7 @@ if st.session_state.get("log_trade_dialog"):
             cols = st.columns(4)
             date_val = cols[0].date_input("Date", dt.date.today())
             symbol = cols[0].selectbox("Symbol", ["EUR/USD", "USD/JPY", "GBP/USD", "Other"])
-            if symbol == "Other": symbol = cols[0].text_input("Custom Symbol")
+            if symbol == "Other": symbol = cols[0].text_input("Custom Symbol", key="custom_symbol_new")
 
             direction = cols[1].radio("Direction", ["Long", "Short"], horizontal=True)
             outcome = cols[1].selectbox("Outcome", ["Win", "Loss", "Breakeven", "Study"])
@@ -241,19 +241,21 @@ if st.session_state.get("log_trade_dialog"):
             if st.form_submit_button("Log Trade", use_container_width=True):
                 risk = abs(entry - stop) if stop > 0 else 0
                 pnl = ((exit_price - entry) if direction == "Long" else (entry - exit_price)) * lots * 100000 * 0.0001 if outcome in ["Win", "Loss"] else 0
-                rr = (pnl / (risk * lots * 100000 * 0.0001)) if risk > 0 else 0
+                rr = (pnl / (risk * lots * 100000 * 0.0001)) if risk > 0 and (risk * lots) != 0 else 0
                 
-                new_trade = pd.DataFrame([{
+                new_trade_data = {
                     "TradeID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
                     "Symbol": symbol, "Direction": direction, "Outcome": outcome, "Lots": lots,
                     "EntryPrice": entry, "StopLoss": stop, "FinalExit": exit_price,
-                    "PnL": pnl, "RR": rr, "EntryRationale": rationale, "Strategy": "", "Tags": "", 
-                    "TradeJournalNotes": "", "EntryScreenshot": "", "ExitScreenshot": ""
-                }])
+                    "PnL": pnl, "RR": rr, "EntryRationale": rationale,
+                    "Strategy": "", "Tags": "", "TradeJournalNotes": "", "EntryScreenshot": "", "ExitScreenshot": ""
+                }
                 
-                st.session_state.trade_journal = pd.concat([st.session_state.trade_journal, new_trade], ignore_index=True)
+                new_df = pd.DataFrame([new_trade_data]).astype(journal_dtypes, errors='ignore')
+                st.session_state.trade_journal = pd.concat([st.session_state.trade_journal, new_df], ignore_index=True)
+                
                 if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
-                     st.toast(f"Trade {new_trade['TradeID'].iloc[0]} logged!")
+                     st.toast(f"Trade {new_trade_data['TradeID']} logged!")
                 st.session_state.log_trade_dialog = False
                 st.rerun()
 st.markdown("---")
@@ -261,7 +263,8 @@ st.markdown("---")
 # =========================================================
 # MAIN INTERFACE: Chart and Tabs
 # =========================================================
-pairs_map = { "EUR/USD": "FX:EURUSD", "USD/JPY": "FX:USDJPY", "GBP/USD": "FX:GBPUSD"}
+pairs_map = {"EUR/USD": "FX:EURUSD", "USD/JPY": "FX:USDJPY", "GBP/USD": "FX:GBPUSD", "USD/CHF": "OANDA:USDCHF",
+             "AUD/USD": "FX:AUDUSD", "NZD/USD": "OANDA:NZDUSD", "USD/CAD": "FX:USDCAD"}
 tv_symbol = pairs_map[st.selectbox("Select Chart Pair", list(pairs_map.keys()), index=0, key="tv_pair")]
 
 tv_html = f"""<div id="tv_chart_container" style="height: 500px;"></div><script src="https://s3.tradingview.com/tv.js"></script><script>new TradingView.widget({{ "container_id": "tv_chart_container", "autosize": true, "symbol": "{tv_symbol}", "interval": "D", "timezone": "Etc/UTC", "theme": "dark", "style": "1" }});</script>"""
@@ -272,30 +275,70 @@ tab_playbook, tab_analytics = st.tabs(["**📚 Trade Playbook**", "**📊 Analyt
 
 with tab_playbook:
     if st.session_state.trade_journal.empty:
-        st.info("Your logged trades appear here. Click 'Log New Trade' to get started!")
+        st.info("Your logged trades will appear here. Click 'Log New Trade' to get started!")
     else:
         playbook_cols = st.columns([5, 7])
         with playbook_cols[0]:
             st.subheader("Trade History")
-            # ... Filtering UI ...
-            df_display = st.session_state.trade_journal.sort_values("Date", ascending=False)
+            
+            # Filtering UI
+            df_filtered = st.session_state.trade_journal.copy()
+            unique_tags = sorted(list(set(df_filtered['Tags'].str.split(',').explode().dropna().str.strip())))
+            tag_filter = st.multiselect("Filter by Tags", options=unique_tags)
+            if tag_filter:
+                df_filtered = df_filtered[df_filtered['Tags'].apply(lambda x: any(tag in str(x) for tag in tag_filter))]
+
+            df_display = df_filtered.sort_values("Date", ascending=False)
             st.dataframe(df_display[["Date", "Symbol", "Direction", "Outcome", "PnL", "RR"]],
                          key="trade_selector", on_select="rerun", hide_index=True,
-                         column_config={"Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD")},
-                         use_container_width=True)
+                         column_config={
+                             "Date": st.column_config.DateColumn("Date", format="YYYY-MM-DD"),
+                             "PnL": st.column_config.NumberColumn("PnL ($)", format="$%.2f"),
+                             "RR": st.column_config.NumberColumn("R:R", format="%.2fR"),
+                         }, use_container_width=True)
 
         with playbook_cols[1]:
             selection = st.session_state.get("trade_selector", {}).get("selection", {})
             if not selection or not selection.get("rows"):
                 st.subheader("Select a Trade")
-                st.info("Click a row in the Trade History to view and edit details.")
+                st.info("Click a row in the Trade History table to view and edit its full details.")
             else:
-                selected_idx = selection["rows"][0]
-                trade_id = df_display.iloc[selected_idx]['TradeID']
-                trade_data_series = st.session_state.trade_journal.loc[st.session_state.trade_journal['TradeID'] == trade_id].iloc[0]
+                selected_row_index_in_display_df = selection["rows"][0]
+                trade_id = df_display.iloc[selected_row_index_in_display_df]['TradeID']
+                original_df_index = st.session_state.trade_journal.index[st.session_state.trade_journal['TradeID'] == trade_id][0]
+                
+                trade_data = st.session_state.trade_journal.loc[original_df_index].to_dict()
 
-                st.subheader(f"Reviewing Trade: {trade_data_series['TradeID']}")
-                # ... Editing Form as before ...
+                st.subheader(f"Reviewing Trade: {trade_data['TradeID']}")
+                
+                with st.form(f"edit_{trade_id}"):
+                    st.markdown("**Core Metrics**")
+                    metric_cols = st.columns(4)
+                    metric_cols[0].metric("PnL", f"${trade_data['PnL']:.2f}")
+                    metric_cols[1].metric("R-Multiple", f"{trade_data['RR']:.2f}R")
+                    metric_cols[2].metric("Lots", f"{trade_data['Lots']:.2f}")
+                    metric_cols[3].metric("Outcome", trade_data['Outcome'])
+
+                    st.markdown("**Trade Context & Notes**")
+                    edited_rationale = st.text_area("Entry Rationale", trade_data['EntryRationale'])
+                    
+                    edited_tags = st.multiselect("Tags",
+                                                 options=unique_tags + ["New Tag..."],
+                                                 default=[t.strip() for t in trade_data['Tags'].split(',') if t])
+                    if "New Tag..." in edited_tags:
+                        new_tag = st.text_input("Enter new tag:")
+                        if new_tag: edited_tags = [t for t in edited_tags if t != "New Tag..."] + [new_tag]
+
+                    edited_notes = st.text_area("Detailed Notes (Supports Markdown)", trade_data['TradeJournalNotes'], height=250)
+                    
+                    if st.form_submit_button("Save Changes", use_container_width=True, type="primary"):
+                        st.session_state.trade_journal.loc[original_df_index, 'EntryRationale'] = edited_rationale
+                        st.session_state.trade_journal.loc[original_df_index, 'Tags'] = ','.join(edited_tags)
+                        st.session_state.trade_journal.loc[original_df_index, 'TradeJournalNotes'] = edited_notes
+                        
+                        _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal)
+                        st.toast(f"Trade {trade_id} updated!")
+                        st.rerun()
 
 with tab_analytics:
     st.header("Your Performance Dashboard")
@@ -304,15 +347,32 @@ with tab_analytics:
     if df_analytics.empty:
         st.info("Complete at least one winning or losing trade to view your performance analytics.")
     else:
-        # High-Level KPIs
         total_pnl = df_analytics['PnL'].sum()
+        total_trades = len(df_analytics)
         wins = df_analytics[df_analytics['Outcome'] == 'Win']
-        losses = df_analytics[df_analytics['Outcome'] == 'Loss'] # Correctly defined here
-        win_rate = (len(wins) / len(df_analytics)) * 100 if len(df_analytics) > 0 else 0
+        losses = df_analytics[df_analytics['Outcome'] == 'Loss']
         
+        win_rate = (len(wins) / total_trades) * 100 if total_trades > 0 else 0
+        avg_win_rr = wins['RR'].mean() if not wins.empty else 0
+        avg_loss_rr = losses['RR'].mean() if not losses.empty else 0
+        profit_factor = wins['PnL'].sum() / abs(losses['PnL'].sum()) if not losses.empty and losses['PnL'].sum() != 0 else 0
+
         kpi_cols = st.columns(4)
         kpi_cols[0].metric("Net PnL ($)", f"${total_pnl:,.2f}", delta=f"{total_pnl:+.2f}")
         kpi_cols[1].metric("Win Rate", f"{win_rate:.1f}%")
-        # ... Other metrics ...
-
-        # ... Charts ...
+        kpi_cols[2].metric("Profit Factor", f"{profit_factor:.2f}")
+        kpi_cols[3].metric("Avg Win / Loss (RR)", f"{avg_win_rr:.2f}R / {avg_loss_rr:.2f}R")
+        
+        st.markdown("---")
+        chart_cols = st.columns(2)
+        with chart_cols[0]:
+            st.subheader("Equity Curve")
+            df_analytics.sort_values('Date', inplace=True)
+            df_analytics['CumulativePnL'] = df_analytics['PnL'].cumsum()
+            fig_equity = px.area(df_analytics, x='Date', y='CumulativePnL', template="plotly_dark")
+            st.plotly_chart(fig_equity.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22"), use_container_width=True)
+            
+        with chart_cols[1]:
+            st.subheader("R-Multiple Distribution")
+            fig_rr = px.histogram(df_analytics, x="RR", nbins=20, title="Distribution of Trade Outcomes by R-Multiple", template="plotly_dark")
+            st.plotly_chart(fig_rr.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22"), use_container_width=True)
