@@ -294,12 +294,15 @@ with tab_entry:
         
         calculate_pnl_rr = st.checkbox("Calculate PnL/RR from Entry/Stop/Exit Prices", value=False, 
                                        help="Check this to automatically calculate PnL and R:R based on prices entered above, overriding manual inputs.")
-
-        with st.expander("Add Quick Rationale & Tags (Optional)"):
-            entry_rationale = st.text_area("Why did you enter this trade?", height=100)
-            all_tags = sorted(list(set(st.session_state.trade_journal['Tags'].str.split(',').explode().dropna().str.strip())))
-            suggested_tags = ["Breakout", "Reversal", "Trend Follow", "Counter-Trend", "News Play", "FOMO", "Over-leveraged"]
-            tags = st.multiselect("Trade Tags", options=sorted(list(set(all_tags + suggested_tags))))
+        st.markdown("---")
+        st.markdown("##### Rationale & Tags")
+        entry_rationale = st.text_area("Why did you enter this trade?", height=100)
+        
+        all_tags = sorted(list(set(st.session_state.trade_journal['Tags'].str.split(',').explode().dropna().str.strip())))
+        suggested_tags = ["Breakout", "Reversal", "Trend Follow", "Counter-Trend", "News Play", "FOMO", "Over-leveraged"]
+        tags_selection = st.multiselect("Select Existing Tags", options=sorted(list(set(all_tags + suggested_tags))))
+        
+        new_tags_input = st.text_input("Add New Tags (comma-separated)", placeholder="e.g., strong momentum, poor entry, ...")
 
         submitted = st.form_submit_button("Save Trade", type="primary", use_container_width=True)
         if submitted:
@@ -309,17 +312,15 @@ with tab_entry:
                 risk_per_unit = abs(entry_price - stop_loss) if stop_loss > 0 else 0
                 
                 if outcome in ["Win", "Loss"]:
-                    # Assuming a fixed pip value calculation for FX (standard lot: 100,000 units, 4-decimal pair: 0.0001)
-                    # This might need adjustment for other asset types or if your "lots" imply something else
                     pnl_calculated = ((final_exit - entry_price) if direction == "Long" else (entry_price - final_exit)) * lots * 100000 * 0.0001
                 else:
-                    pnl_calculated = 0.0 # Breakeven or No Trade/Study has 0 PnL
+                    pnl_calculated = 0.0
 
                 if risk_per_unit > 0:
                     pnl_per_unit_abs = abs(final_exit - entry_price)
                     rr_calculated = (pnl_per_unit_abs / risk_per_unit) if pnl_calculated >= 0 else -(pnl_per_unit_abs / risk_per_unit)
                 else:
-                    rr_calculated = 0.0 # Cannot calculate R:R without a defined stop loss
+                    rr_calculated = 0.0 
 
                 final_pnl = pnl_calculated
                 final_rr = rr_calculated
@@ -327,12 +328,16 @@ with tab_entry:
                 final_pnl = manual_pnl_input
                 final_rr = manual_rr_input
 
+            # Combine tags from multiselect and new text input
+            newly_added_tags = [tag.strip() for tag in new_tags_input.split(',') if tag.strip()]
+            final_tags_list = sorted(list(set(tags_selection + newly_added_tags)))
+            
             new_trade_data = {
                 "TradeID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
                 "Symbol": symbol, "Direction": direction, "Outcome": outcome,
                 "Lots": lots, "EntryPrice": entry_price, "StopLoss": stop_loss, "FinalExit": final_exit,
                 "PnL": final_pnl, "RR": final_rr, 
-                "Tags": ','.join(tags), "EntryRationale": entry_rationale,
+                "Tags": ','.join(final_tags_list), "EntryRationale": entry_rationale,
                 "Strategy": '', "TradeJournalNotes": '', "EntryScreenshot": '', "ExitScreenshot": ''
             }
             new_df = pd.DataFrame([new_trade_data])
@@ -374,7 +379,7 @@ with tab_playbook:
                 st.markdown(f"""
                 <div style="border: 1px solid #30363d; border-left: 8px solid {outcome_color}; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1rem;">
                     <h4>{row['Symbol']} <span style="font-weight: 500; color: {outcome_color};">{row['Direction']} / {row['Outcome']}</span></h4>
-                    <span style="color: #8b949e; font-family: monospace;">{row['Date'].strftime('%d %B %Y')} | {row['TradeID']}</span>
+                    <span style="color: #8b949e; font-size: 0.9em;">{row['Date'].strftime('%A, %d %B %Y')} | {row['TradeID']}</span>
                 </div>
                 """, unsafe_allow_html=True)
 
@@ -404,6 +409,7 @@ with tab_playbook:
                         st.session_state.trade_journal.loc[st.session_state.trade_journal['TradeID'] == row['TradeID'], 'TradeJournalNotes'] = notes
                         if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
                             st.toast(f"Notes for {row['TradeID']} saved!", icon="✅")
+                            st.rerun() # Rerun to reflect saved notes in the textarea if the user re-opens
                         else:
                             st.error("Failed to save notes.")
 
