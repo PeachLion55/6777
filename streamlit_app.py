@@ -149,8 +149,7 @@ def _ta_save_journal(username, journal_df):
 def ta_update_xp(username, amount):
     user_data = get_user_data(username)
     user_data['xp'] = user_data.get('xp', 0) + amount
-    if amount > 0:
-        st.toast(f"⭐ +{amount} XP Earned!", icon="🎉")
+    st.toast(f"⭐ +{amount} XP Earned!", icon="🎉")
     save_user_data(username, user_data)
 
 def ta_update_streak(username):
@@ -161,7 +160,7 @@ def ta_update_streak(username):
     
     if last_date_str:
         last_date = dt.date.fromisoformat(last_date_str)
-        if last_date == today: return
+        if last_date == today: return # Already journaled today
         if last_date == today - dt.timedelta(days=1): streak += 1
         else: streak = 1
     else: streak = 1
@@ -187,6 +186,7 @@ if 'logged_in_user' not in st.session_state:
 # =========================================================
 # JOURNAL SCHEMA & ROBUST DATA MIGRATION (REVISED)
 # =========================================================
+# CLEANED UP SCHEMA with safe names for columns
 journal_cols = [
     "TradeID", "Date", "Symbol", "Direction", "Outcome", "PnL", "RR", 
     "Strategy", "Tags", "EntryPrice", "StopLoss", "FinalExit", "Lots",
@@ -205,6 +205,7 @@ if 'trade_journal' not in st.session_state:
     journal_data = user_data.get("trade_journal", [])
     df = pd.DataFrame(journal_data)
     
+    # Safely migrate data to the new, safer schema
     legacy_col_map = {
         "Trade ID": "TradeID", "Entry Price": "EntryPrice", "Stop Loss": "StopLoss",
         "Final Exit": "FinalExit", "PnL ($)": "PnL", "R:R": "RR",
@@ -263,7 +264,7 @@ with tab_entry:
 
     with st.form("trade_entry_form", clear_on_submit=True):
         st.markdown("##### ⚡ Trade Entry Details")
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3 = st.columns(3) # Adjusted to 3 columns
 
         with col1:
             date_val = st.date_input("Date", dt.date.today())
@@ -279,7 +280,7 @@ with tab_entry:
         
         st.markdown("---")
         st.markdown("##### Trade Results & Metrics")
-        res_col1, res_col2, res_col3 = st.columns(3)
+        res_col1, res_col2, res_col3 = st.columns(3) # New 3-column row for results
 
         with res_col1:
             final_exit = st.number_input("Final Exit Price", min_value=0.0, value=0.0, step=0.00001, format="%.5f")
@@ -298,27 +299,27 @@ with tab_entry:
             entry_rationale = st.text_area("Why did you enter this trade?", height=100)
             all_tags = sorted(list(set(st.session_state.trade_journal['Tags'].str.split(',').explode().dropna().str.strip())))
             suggested_tags = ["Breakout", "Reversal", "Trend Follow", "Counter-Trend", "News Play", "FOMO", "Over-leveraged"]
-            tags = st.multiselect("Select Existing Tags", options=sorted(list(set(all_tags + suggested_tags))))
-            custom_tags_input = st.text_input("Or Add New Tags (comma-separated)", placeholder="e.g., Scalp, Fed Meeting")
-
+            tags = st.multiselect("Trade Tags", options=sorted(list(set(all_tags + suggested_tags))))
 
         submitted = st.form_submit_button("Save Trade", type="primary", use_container_width=True)
         if submitted:
-            final_pnl, final_rr = 0.0, 0.0
+            final_pnl, final_rr = 0.0, 0.0 # Initialize final values
 
             if calculate_pnl_rr:
                 risk_per_unit = abs(entry_price - stop_loss) if stop_loss > 0 else 0
                 
                 if outcome in ["Win", "Loss"]:
+                    # Assuming a fixed pip value calculation for FX (standard lot: 100,000 units, 4-decimal pair: 0.0001)
+                    # This might need adjustment for other asset types or if your "lots" imply something else
                     pnl_calculated = ((final_exit - entry_price) if direction == "Long" else (entry_price - final_exit)) * lots * 100000 * 0.0001
                 else:
-                    pnl_calculated = 0.0
+                    pnl_calculated = 0.0 # Breakeven or No Trade/Study has 0 PnL
 
                 if risk_per_unit > 0:
                     pnl_per_unit_abs = abs(final_exit - entry_price)
                     rr_calculated = (pnl_per_unit_abs / risk_per_unit) if pnl_calculated >= 0 else -(pnl_per_unit_abs / risk_per_unit)
                 else:
-                    rr_calculated = 0.0
+                    rr_calculated = 0.0 # Cannot calculate R:R without a defined stop loss
 
                 final_pnl = pnl_calculated
                 final_rr = rr_calculated
@@ -326,15 +327,12 @@ with tab_entry:
                 final_pnl = manual_pnl_input
                 final_rr = manual_rr_input
 
-            custom_tags_list = [tag.strip() for tag in custom_tags_input.split(',') if tag.strip()]
-            final_tags_list = sorted(list(set(tags + custom_tags_list)))
-
             new_trade_data = {
                 "TradeID": f"TRD-{uuid.uuid4().hex[:6].upper()}", "Date": pd.to_datetime(date_val),
                 "Symbol": symbol, "Direction": direction, "Outcome": outcome,
                 "Lots": lots, "EntryPrice": entry_price, "StopLoss": stop_loss, "FinalExit": final_exit,
                 "PnL": final_pnl, "RR": final_rr, 
-                "Tags": ','.join(final_tags_list), "EntryRationale": entry_rationale,
+                "Tags": ','.join(tags), "EntryRationale": entry_rationale,
                 "Strategy": '', "TradeJournalNotes": '', "EntryScreenshot": '', "ExitScreenshot": ''
             }
             new_df = pd.DataFrame([new_trade_data])
@@ -370,29 +368,15 @@ with tab_playbook:
         if tag_filter:
             filtered_df = filtered_df[filtered_df['Tags'].apply(lambda x: any(tag in str(x) for tag in tag_filter))]
 
-        if 'trade_to_delete' in st.session_state and st.session_state.trade_to_delete is not None:
-            index_to_delete = st.session_state.trade_to_delete
-            st.session_state.trade_journal.drop(index_to_delete, inplace=True)
-            st.session_state.trade_journal.reset_index(drop=True, inplace=True)
-            
-            ta_update_xp(st.session_state.logged_in_user, -10)
-            _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal)
-            
-            st.toast("Trade removed. -10 XP penalty.", icon="🗑️")
-            del st.session_state['trade_to_delete']
-            st.rerun()
-
         for index, row in filtered_df.sort_values(by="Date", ascending=False).iterrows():
             outcome_color = {"Win": "#2da44e", "Loss": "#cf222e", "Breakeven": "#8b949e"}.get(row['Outcome'], "#30363d")
-            with st.container(border=True):
+            with st.container():
                 st.markdown(f"""
-                <div style="border-left: 6px solid {outcome_color}; padding-left: 10px;">
-                    <h4 style="margin-bottom: 0.25rem;">{row['Symbol']} <span style="font-weight: 500;">{row['Direction']} / {row['Outcome']}</span></h4>
-                    <span style="color: #8b949e; font-size: 0.9rem;">{row['Date'].strftime('%A, %d %B %Y')} | ID: {row['TradeID']}</span>
+                <div style="border: 1px solid #30363d; border-left: 8px solid {outcome_color}; border-radius: 8px; padding: 1rem 1.5rem; margin-bottom: 1rem;">
+                    <h4>{row['Symbol']} <span style="font-weight: 500; color: {outcome_color};">{row['Direction']} / {row['Outcome']}</span></h4>
+                    <span style="color: #8b949e; font-family: monospace;">{row['Date'].strftime('%d %B %Y')} | {row['TradeID']}</span>
                 </div>
                 """, unsafe_allow_html=True)
-                
-                st.write("") # ADDED: Vertical space for better separation
 
                 metric_cols = st.columns(3)
                 metric_cols[0].metric("Net PnL", f"${row['PnL']:.2f}")
@@ -404,33 +388,36 @@ with tab_playbook:
                 if row['Tags']:
                     tags_list = [f"`{tag.strip()}`" for tag in str(row['Tags']).split(',') if tag.strip()]
                     st.markdown(f"**Tags:** {', '.join(tags_list)}")
+                
+                with st.expander("Journal Notes & Actions"):
+                    # Using unique keys based on TradeID is critical inside a loop
+                    notes = st.text_area(
+                        "Trade Journal Notes", 
+                        value=row['TradeJournalNotes'], 
+                        key=f"notes_{row['TradeID']}",
+                        height=150
+                    )
+                    
+                    action_cols = st.columns([1, 1, 4]) 
+                    
+                    if action_cols[0].button("Save Notes", key=f"save_{row['TradeID']}", type="primary"):
+                        st.session_state.trade_journal.loc[st.session_state.trade_journal['TradeID'] == row['TradeID'], 'TradeJournalNotes'] = notes
+                        if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
+                            st.toast(f"Notes for {row['TradeID']} saved!", icon="✅")
+                        else:
+                            st.error("Failed to save notes.")
 
-                with st.expander("Add/View Journal Notes & Actions"):
-                    # ADDED: Columns to constrain the width of the notes section
-                    note_cols = st.columns([2, 1])
-                    with note_cols[0]:
-                        with st.form(key=f"notes_form_{row['TradeID']}"):
-                            notes_content = st.text_area(
-                                "Journal Notes (Supports Markdown)",
-                                value=row['TradeJournalNotes'],
-                                height=250,
-                                label_visibility="collapsed"
-                            )
-                            if st.form_submit_button("Save Notes", use_container_width=True):
-                                st.session_state.trade_journal.loc[index, 'TradeJournalNotes'] = notes_content
-                                if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
-                                    st.toast("Notes saved successfully!", icon="✅")
-                                else:
-                                    st.error("Failed to save notes.")
-                                st.rerun()
-                        
-                        st.markdown("---")
-                        st.markdown("**⚠️ Danger Zone**")
-                        if st.button("Delete Trade", key=f"delete_{row['TradeID']}", use_container_width=True, type="primary"):
-                            st.session_state['trade_to_delete'] = index
+                    if action_cols[1].button("Delete Trade", key=f"delete_{row['TradeID']}"):
+                        index_to_drop = st.session_state.trade_journal[st.session_state.trade_journal['TradeID'] == row['TradeID']].index
+                        st.session_state.trade_journal.drop(index_to_drop, inplace=True)
+                        if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
+                            st.toast(f"Trade {row['TradeID']} deleted.", icon="🗑️")
                             st.rerun()
+                        else: 
+                            st.error("Failed to delete trade.")
 
-            st.markdown("---") 
+                st.markdown("---")
+
 
 # --- TAB 3: ANALYTICS DASHBOARD ---
 with tab_analytics:
@@ -440,6 +427,7 @@ with tab_analytics:
     if df_analytics.empty:
         st.info("Complete at least one winning or losing trade to view your performance analytics.")
     else:
+        # High-Level KPIs
         total_pnl = df_analytics['PnL'].sum()
         total_trades = len(df_analytics)
         wins = df_analytics[df_analytics['Outcome'] == 'Win']
@@ -458,6 +446,7 @@ with tab_analytics:
         
         st.markdown("---")
 
+        # Visualizations
         chart_cols = st.columns(2)
         with chart_cols[0]:
             st.subheader("Cumulative PnL")
