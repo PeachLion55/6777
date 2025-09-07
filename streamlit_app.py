@@ -444,8 +444,31 @@ with tab_analytics:
         avg_loss = losses['PnL'].mean() if not losses.empty else 0
         profit_factor = wins['PnL'].sum() / abs(losses['PnL'].sum()) if not losses.empty and losses['PnL'].sum() != 0 else 0
 
+        # Logic for custom PnL metric
+        if total_pnl > 0:
+            pnl_color = "#2da44e"
+            pnl_arrow = "▲"
+        elif total_pnl < 0:
+            pnl_color = "#cf222e"
+            pnl_arrow = "▼"
+        else:
+            pnl_color = "#8b949e"
+            pnl_arrow = ""
+        
+        pnl_metric_html = f"""
+        <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; height: 100%;">
+            <div style="font-weight: 500; color: #8b949e; font-size: 0.9em; line-height: 1.6;">Net PnL ($)</div>
+            <div style="display: flex; align-items: baseline; font-size: 1.75em; font-weight: 600; color: #c9d1d9; line-height: 1.4;">
+                <span>${total_pnl:,.2f}</span>
+                <span style="color: {pnl_color}; font-size: 0.75em; font-weight: 500; margin-left: 0.5rem; white-space: nowrap;">
+                    {pnl_arrow} {abs(total_pnl):,.2f}
+                </span>
+            </div>
+        </div>
+        """
+        
         kpi_cols = st.columns(4)
-        kpi_cols[0].metric("Net PnL ($)", f"${total_pnl:,.2f}", delta=f"{total_pnl:+.2f}")
+        kpi_cols[0].markdown(pnl_metric_html, unsafe_allow_html=True)
         kpi_cols[1].metric("Win Rate", f"{win_rate:.1f}%")
         kpi_cols[2].metric("Profit Factor", f"{profit_factor:.2f}")
         kpi_cols[3].metric("Avg. Win / Loss ($)", f"${avg_win:,.2f} / ${abs(avg_loss):,.2f}")
