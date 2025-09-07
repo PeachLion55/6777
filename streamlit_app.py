@@ -59,6 +59,7 @@ st.markdown("""
     [data-testid="stMetricLabel"] {
         font-weight: 500;
         color: #8b949e;
+        font-size: 0.875rem !important;
     }
 
     /* --- Tab Styling --- */
@@ -409,7 +410,7 @@ with tab_playbook:
                         st.session_state.trade_journal.loc[st.session_state.trade_journal['TradeID'] == row['TradeID'], 'TradeJournalNotes'] = notes
                         if _ta_save_journal(st.session_state.logged_in_user, st.session_state.trade_journal):
                             st.toast(f"Notes for {row['TradeID']} saved!", icon="✅")
-                            st.rerun() # Rerun to reflect saved notes in the textarea if the user re-opens
+                            st.rerun() 
                         else:
                             st.error("Failed to save notes.")
 
@@ -445,22 +446,19 @@ with tab_analytics:
         profit_factor = wins['PnL'].sum() / abs(losses['PnL'].sum()) if not losses.empty and losses['PnL'].sum() != 0 else 0
 
         # Logic for custom PnL metric
-        if total_pnl > 0:
+        if total_pnl >= 0:
             pnl_color = "#2da44e"
             pnl_arrow = "▲"
-        elif total_pnl < 0:
+        else:
             pnl_color = "#cf222e"
             pnl_arrow = "▼"
-        else:
-            pnl_color = "#8b949e"
-            pnl_arrow = ""
-        
+
         pnl_metric_html = f"""
-        <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem; height: 100%;">
-            <div style="font-weight: 500; color: #8b949e; font-size: 0.9em; line-height: 1.6;">Net PnL ($)</div>
-            <div style="display: flex; align-items: baseline; font-size: 1.75em; font-weight: 600; color: #c9d1d9; line-height: 1.4;">
-                <span>${total_pnl:,.2f}</span>
-                <span style="color: {pnl_color}; font-size: 0.75em; font-weight: 500; margin-left: 0.5rem; white-space: nowrap;">
+        <div style="background-color: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1.2rem;">
+            <div style="font-weight: 500; color: #8b949e; font-size: 0.875rem; line-height: 1.6; margin-bottom: 0.1rem;">Net PnL ($)</div>
+            <div style="display: flex; align-items: baseline; justify-content: flex-start;">
+                <span style="font-size: 2rem; font-weight: 600; color: #c9d1d9; line-height: 1.4;">${total_pnl:,.2f}</span>
+                <span style="color: {pnl_color}; font-size: 1rem; font-weight: 500; margin-left: 0.5rem; white-space: nowrap; display: flex; align-items: center;">
                     {pnl_arrow} {abs(total_pnl):,.2f}
                 </span>
             </div>
@@ -479,7 +477,7 @@ with tab_analytics:
         chart_cols = st.columns(2)
         with chart_cols[0]:
             st.subheader("Cumulative PnL")
-            df_analytics['CumulativePnL'] = df_analytics['PnL'].cumsum()
+            df_analytics['CumulativePnL'] = df_analytics.sort_values(by='Date')['PnL'].cumsum()
             fig_equity = px.area(df_analytics, x='Date', y='CumulativePnL', title="Your Equity Curve", template="plotly_dark")
             fig_equity.update_layout(paper_bgcolor="#0d1117", plot_bgcolor="#161b22")
             st.plotly_chart(fig_equity, use_container_width=True)
